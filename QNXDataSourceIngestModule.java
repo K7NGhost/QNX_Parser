@@ -20,31 +20,39 @@ import org.sleuthkit.autopsy.ingest.IngestJobContext;
 import org.sleuthkit.autopsy.ingest.IngestMessage;
 import org.sleuthkit.autopsy.ingest.IngestServices;
 import org.sleuthkit.datamodel.TskData;
+import org.sleuthkit.datamodel.Image;
 
-public class QNXDataSourceIngestModule implements FileIngestModule {
+public class QNXDataSourceIngestModule implements DataSourceIngestModule {
     
     private final boolean skipKnownFiles;
     private IngestJobContext context = null;
+    private static final Logger logger = Logger.getLogger(QNXDataSourceIngestModule.class.getName());
     
     QNXDataSourceIngestModule(QNXModuleIngestJobSettings settings) {
         this.skipKnownFiles = settings.skipKnownFiles();
     }
 
-    public void startUp() {
-        // Initialization code
-    }
-
     @Override
-    public ProcessResult process(AbstractFile file) {
-        if (file.getNameExtension().equalsIgnoreCase("qnx6")) {
-            // Add processing logic for QNX6 files
-            System.out.println("Processing QNX6 file: " + file.getName());
-        }
+    public void startUp(IngestJobContext context) throws IngestModuleException {
+        this.context = context;
+    }
+    
+    @Override
+    public ProcessResult process(Content dataSource, DataSourceIngestModuleProgress progressBar) {
+        
+        // check if data source is a disk image
+        
+        // Validate QNX filesystem
+        // validateqnxfilesystem()
+        
+        //Parse QNX filesystem
+        //try parseqnxfilesystem() catch exception
+        
         return ProcessResult.OK;
     }
 
-    @Override
-    public void shutDown() {
-        // Cleanup code
+    public void parseQNXFileSystem(Image image) {
+        
     }
+
 }
