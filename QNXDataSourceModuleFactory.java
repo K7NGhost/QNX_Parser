@@ -10,7 +10,7 @@ import org.sleuthkit.autopsy.ingest.IngestModuleIngestJobSettings;
 import org.sleuthkit.autopsy.ingest.IngestModuleIngestJobSettingsPanel;
 
 @ServiceProvider(service = IngestModuleFactory.class) 
-public class QNXFileIngestModuleFactory implements IngestModuleFactory {
+public class QNXDataSourceIngestModuleFactory implements IngestModuleFactory {
     
     private static final String VERSION_NUMBER = "1.0.0";
     private static final String MODULE_NAME = "QNX parser";
