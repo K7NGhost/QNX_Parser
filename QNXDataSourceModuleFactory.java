@@ -43,10 +43,12 @@ public class QNXDataSourceIngestModuleFactory implements IngestModuleFactory {
     
     @Override
     public DataSourceIngestModule createDataSourceIngestModule(IngestModuleIngestJobSettings settings) {
-        if(!(settings instanceof QNXModuleIngestJobSettings)) {
-            throw new IllegalArgumentException("Expected settings argument to be instanceof SampleModuleIngestJobSettings");
-        }
-        return (DataSourceIngestModule) new QNXDataSourceIngestModule((QNXModuleIngestJobSettings) settings);
+        return new QNXDataSourceIngestModule();
+    }
+    
+    @Override
+    public IngestModuleIngestJobSettings getDefaultIngestJobSettings() {
+        return new QNXModuleIngestJobSettings();
     }
     
 }
