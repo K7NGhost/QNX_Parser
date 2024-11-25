@@ -20,31 +20,44 @@ import org.sleuthkit.autopsy.ingest.IngestJobContext;
 import org.sleuthkit.autopsy.ingest.IngestMessage;
 import org.sleuthkit.autopsy.ingest.IngestServices;
 import org.sleuthkit.datamodel.TskData;
+import org.sleuthkit.datamodel.Image;
 
-public class QNXDataSourceIngestModule implements FileIngestModule {
+public class QNXDataSourceIngestModule implements DataSourceIngestModule {
     
-    private final boolean skipKnownFiles;
     private IngestJobContext context = null;
+    private static final Logger logger = Logger.getLogger(QNXDataSourceIngestModule.class.getName());
+    private QNX6FS QNXFile;
     
-    QNXDataSourceIngestModule(QNXModuleIngestJobSettings settings) {
-        this.skipKnownFiles = settings.skipKnownFiles();
-    }
-
-    public void startUp() {
-        // Initialization code
+    QNXDataSourceIngestModule() {
     }
 
     @Override
-    public ProcessResult process(AbstractFile file) {
-        if (file.getNameExtension().equalsIgnoreCase("qnx6")) {
-            // Add processing logic for QNX6 files
-            System.out.println("Processing QNX6 file: " + file.getName());
+    public void startUp(IngestJobContext context) throws IngestModuleException {
+        this.context = context;
+    }
+    
+    @Override
+    public ProcessResult process(Content dataSource, DataSourceIngestModuleProgress progressBar) {
+        try {
+            QNXFile = new QNX6FS(dataSource);
+            // Iterate over Content objects in the data source
+            for (Content content: dataSource.getChildren()) {
+                if (content instanceof Image) {
+                    QNXFile.getPartitions();
+                }
+            }
+            System.out.println("Looking good");
+            return ProcessResult.OK;
         }
-        return ProcessResult.OK;
+        catch (Exception e) {
+            e.printStackTrace();
+            return ProcessResult.ERROR;
+        }
+        
     }
 
-    @Override
-    public void shutDown() {
-        // Cleanup code
+    public void parseQNXFileSystem(Image image) {
+        
     }
+
 }
