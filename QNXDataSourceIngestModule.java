@@ -40,13 +40,22 @@ public class QNXDataSourceIngestModule implements DataSourceIngestModule {
     public ProcessResult process(Content dataSource, DataSourceIngestModuleProgress progressBar) {
         try {
             QNXFile = new QNX6FS(dataSource);
-            // Iterate over Content objects in the data source
-            for (Content content: dataSource.getChildren()) {
-                if (content instanceof Image) {
-                    QNXFile.getPartitions();
+            if (dataSource instanceof Image) {
+                QNXFile.getPartitions();
+                QNXFile.printPartitions();
+            }
+            else {
+                // Iterate over Content objects in the data source
+                for (Content content: dataSource.getChildren()) {
+                    if (content instanceof Image) {
+                        System.out.println("===================================Content Type: " + content.getClass().getName());
+                        QNXFile.getPartitions();
+                        QNXFile.printPartitions();
+                    }
                 }
             }
             System.out.println("Looking good");
+            System.out.println("other print statement");
             return ProcessResult.OK;
         }
         catch (Exception e) {
