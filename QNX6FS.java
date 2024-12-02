@@ -100,7 +100,7 @@ public class QNX6FS {
             System.out.println("[-] Boot Record Signature detected");
         }
         
-        parsePartitionMBR(QNXImage, masterPartitionTable, 0);
+        parsePartitionMBR(masterPartitionTable);
     }
     
     static class Partition {
@@ -115,40 +115,34 @@ public class QNX6FS {
         long endOffset;
         int sectorSize;
         boolean qnx6;
-        Content content;
     }
     
-    public Map<Integer, Partition> parsePartitionMBR(Content content, byte[] partitionTable, long baseOffset) throws TskCoreException {
+    public Map<Integer, Partition> parsePartitionMBR(byte[] masterPartitionTable) {
         Map<Integer, Partition> partitionList = new HashMap<>();
 
         for (int i = 0; i < 4; i++) {
             int entryOffset = i * 16;
             Partition partition = new Partition();
 
-            partition.bootIndicator = partitionTable[entryOffset];
-            partition.startingCHS = new byte[]{partitionTable[entryOffset + 1], partitionTable[entryOffset + 2], partitionTable[entryOffset + 3]};
-            partition.partitionType = partitionTable[entryOffset + 4];
-            partition.endingCHS = new byte[]{partitionTable[entryOffset + 5], partitionTable[entryOffset + 6], partitionTable[entryOffset + 7]};
+            partition.bootIndicator = masterPartitionTable[entryOffset];
+            partition.startingCHS = new byte[]{masterPartitionTable[entryOffset + 1], masterPartitionTable[entryOffset + 2], masterPartitionTable[entryOffset + 3]};
+            partition.partitionType = masterPartitionTable[entryOffset + 4];
+            partition.endingCHS = new byte[]{masterPartitionTable[entryOffset + 5], masterPartitionTable[entryOffset + 6], masterPartitionTable[entryOffset + 7]};
 
-            partition.startingSector = ByteBuffer.wrap(partitionTable, entryOffset + 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
-            partition.partitionSize = ByteBuffer.wrap(partitionTable, entryOffset + 12, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
-            
-            // Skip if the partition is empty
-            if (partition.partitionType == 0 || partition.partitionSize == 0) {
-                continue;
-            }
-            
+            partition.startingSector = ByteBuffer.wrap(masterPartitionTable, entryOffset + 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+            partition.partitionSize = ByteBuffer.wrap(masterPartitionTable, entryOffset + 12, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+
             partition.endingSector = partition.startingSector + partition.partitionSize - 1;
-            partition.startingOffset = baseOffset + (partition.startingSector * 512L);
-            partition.endOffset = partition.startingOffset + (partition.partitionSize * 512L);
+            partition.startingOffset = partition.startingSector * 512L;
+            partition.endOffset = partition.endingSector * 512L;
             partition.sectorSize = 512;
             partition.qnx6 = false;
 
             int partitionID = partition.partitionType & 0xFF;
             if (partitionID == 0x05 || partitionID == 0x0F) {
                 System.out.println("[-] (EBR) Extended Boot Record Detected, Processing....");
-                parseEBR(content, partitionList, partition.startingOffset);
                 // Additional logic would go here for parsing extended partitions.
+                
             } else if (partitionID == 0xB1 || partitionID == 0xB2 || partitionID == 0xB3 || partitionID == 0xB4) {
                 System.out.printf("[+] Supported QNX6FS Partition Detected @ %02x%n", partition.startingOffset);
                 partition.qnx6 = true;
@@ -160,56 +154,6 @@ public class QNX6FS {
         }
         nPartitionList = partitionList;
         return partitionList;
-    }
-    
-    private void parseEBR(Content content, Map<Integer, Partition> partitionList, long extendedPartitionOffset) throws TskCoreException {
-        System.out.println("Currently in the method that process the extened boot record");
-        long currentOffset = extendedPartitionOffset;
-        System.out.println("the current offset is " + currentOffset);
-
-        while (currentOffset != 0) {
-            try (ReadContentInputStream inputStream = new ReadContentInputStream(content)) {
-                byte[] ebrBlock = new byte[512];
-                inputStream.seek(currentOffset);
-                int bytesRead = inputStream.read(ebrBlock, 0, 512);
-                System.out.println("The bytes read is " + bytesRead);
-                if (bytesRead == 512) {
-                    byte[] logicalPartitionTable = new byte[64];
-                    System.arraycopy(ebrBlock, 446, logicalPartitionTable, 0, 64);
-
-                    Partition logicalPartition = new Partition();
-                    logicalPartition.bootIndicator = logicalPartitionTable[0];
-                    logicalPartition.partitionType = logicalPartitionTable[4];
-                    logicalPartition.startingSector = ByteBuffer.wrap(logicalPartitionTable, 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
-                    logicalPartition.partitionSize = ByteBuffer.wrap(logicalPartitionTable, 12, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
-
-                    if (logicalPartition.partitionType == 0 || logicalPartition.partitionSize == 0) {
-                        break;
-                    }
-
-                    logicalPartition.startingOffset = extendedPartitionOffset + (logicalPartition.startingSector * 512L);
-                    logicalPartition.endOffset = logicalPartition.startingOffset + (logicalPartition.partitionSize * 512L);
-                    logicalPartition.sectorSize = 512;
-                    logicalPartition.qnx6 = (logicalPartition.partitionType == 0xB1 || logicalPartition.partitionType == 0xB2 ||
-                            logicalPartition.partitionType == 0xB3 || logicalPartition.partitionType == 0xB4);
-
-                    partitionList.put(partitionList.size(), logicalPartition);
-
-                    // Move to next EBR if available
-                    int nextEBRStart = ByteBuffer.wrap(ebrBlock, 462, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
-                    if (nextEBRStart == 0) {
-                        break;
-                    }
-
-                    currentOffset = extendedPartitionOffset + (nextEBRStart * 512L);
-                }
-                else {
-                    System.out.println("exiting loop");
-                }
-            } catch (IOException e) {
-                throw new TskCoreException("Error reading Extended Boot Record from disk image", e);
-            }
-        }
     }
     
     public void printPartitions() {
