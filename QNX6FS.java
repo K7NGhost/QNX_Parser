@@ -2,7 +2,7 @@
  * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
  * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
  */
-package org.KevinArgueta.autopsy.module;
+package org.example.autopsy.testmodule;
 
 import org.sleuthkit.datamodel.Content;
 import org.sleuthkit.datamodel.Image;
@@ -29,6 +29,9 @@ import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
+import org.sleuthkit.datamodel.SleuthkitCase.CaseDbTransaction;
+import org.sleuthkit.datamodel.TskData;
+import org.sleuthkit.datamodel.VolumeSystem;
 
 public class QNX6FS {
     public static final HashMap<String, Integer> PARTITION_MAGIC;
@@ -65,7 +68,7 @@ public class QNX6FS {
         this.content = content;
     }
     
-    public void getPartitions() throws TskCoreException, IOException {
+    public void getPartitions(SleuthkitCase skCase, CaseDbTransaction transaction) throws TskCoreException, IOException {
         if (!(content instanceof Image)) {
             throw new IllegalArgumentException("Provided Content is not a valid disk image");
         }
@@ -111,6 +114,7 @@ public class QNX6FS {
         
         // the MasterPartitionTable is 64 bytes in length each partition being 16 bytes
         parsePartitionMBR(masterPartitionTable, QNXImage);
+        createVolumeSystemWithPartitions(skCase, QNXImage, nPartitionList, 512, transaction);
     }
     
     static class Partition {
@@ -266,6 +270,46 @@ public class QNX6FS {
             System.out.printf("  Ending Offset: %d bytes%n", partition.endOffset);
             System.out.printf("  QNX6 Filesystem: %b%n", partition.qnx6);
         }
+    }
+    
+    // ==========================================================================================================================================================================
+    // Adding to the treeviewer in autopsy
+    
+    public void createVolumeSystemWithPartitions (SleuthkitCase skCase, Content dataSource, Map<Integer, Partition> partitions, long sectorSize, CaseDbTransaction transaction) throws TskCoreException {
+        // Parent Id: the data source's object ID 
+        long parentObjId = dataSource.getId();
+        try {
+            VolumeSystem volumeSystem = skCase.addVolumeSystem(parentObjId, TskData.TSK_VS_TYPE_ENUM.TSK_VS_TYPE_UNSUPP, 0, sectorSize, transaction);
+            System.out.println("VolumeSystem created with ID: " + volumeSystem.getId());
+            // Step 2: Add each partition as a Volume
+            long addr = 0;
+            for (Map.Entry<Integer, Partition> entry : partitions.entrySet()) {
+            Partition partition = entry.getValue();
+            skCase.addVolume(volumeSystem.getId(), 
+                    addr++, 
+                    partition.startingSector, 
+                    partition.partitionSize, 
+                    "Partition Type: " + partition.partitionType, 
+                    TskData.TSK_VS_PART_FLAG_ENUM.TSK_VS_PART_FLAG_ALLOC.getVsFlag(),
+                    transaction);
+            
+            System.out.printf("Added Volume: Start Sector=%d, Size=%d%n",
+                          partition.startingSector, partition.partitionSize);
+            }
+            //transaction.commit();
+        }
+        catch (TskCoreException e) {
+            if (transaction != null) {
+                transaction.rollback();
+            }
+            System.err.println("Error during transaction: " + e.getMessage());
+            throw e;
+        }
+        finally {
+            //skCase.close();
+        }
+        
+        
     }
     
     
