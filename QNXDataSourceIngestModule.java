@@ -1,4 +1,4 @@
-package org.KevinArgueta.autopsy.module;
+package org.example.autopsy.testmodule;
 
 import org.sleuthkit.autopsy.ingest.FileIngestModule;
 import org.sleuthkit.datamodel.AbstractFile;
@@ -21,6 +21,8 @@ import org.sleuthkit.autopsy.ingest.IngestMessage;
 import org.sleuthkit.autopsy.ingest.IngestServices;
 import org.sleuthkit.datamodel.TskData;
 import org.sleuthkit.datamodel.Image;
+import org.sleuthkit.datamodel.SleuthkitCase;
+import org.sleuthkit.datamodel.SleuthkitCase.CaseDbTransaction;
 
 public class QNXDataSourceIngestModule implements DataSourceIngestModule {
     
@@ -37,11 +39,14 @@ public class QNXDataSourceIngestModule implements DataSourceIngestModule {
     }
     
     @Override
-    public ProcessResult process(Content dataSource, DataSourceIngestModuleProgress progressBar) {
+    public ProcessResult process(Content dataSource, DataSourceIngestModuleProgress progressBar) { 
         try {
+            SleuthkitCase skCase = Case.getCurrentCase().getSleuthkitCase();
+            CaseDbTransaction transaction = skCase.beginTransaction();
+            System.out.println("the transaction in process worked");
             QNXFile = new QNX6FS(dataSource);
             if (dataSource instanceof Image) {
-                QNXFile.getPartitions();
+                QNXFile.getPartitions(skCase, transaction);
                 QNXFile.printPartitions();
             }
             else {
@@ -49,11 +54,12 @@ public class QNXDataSourceIngestModule implements DataSourceIngestModule {
                 for (Content content: dataSource.getChildren()) {
                     if (content instanceof Image) {
                         System.out.println("===================================Content Type: " + content.getClass().getName());
-                        QNXFile.getPartitions();
+                        QNXFile.getPartitions(skCase, transaction);
                         QNXFile.printPartitions();
                     }
                 }
             }
+            transaction.commit();
             System.out.println("Looking good");
             System.out.println("other print statement");
             return ProcessResult.OK;
