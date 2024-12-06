@@ -283,18 +283,24 @@ public class QNX6FS {
             System.out.println("VolumeSystem created with ID: " + volumeSystem.getId());
             // Step 2: Add each partition as a Volume
             long addr = 0;
-            for (Map.Entry<Integer, Partition> entry : partitions.entrySet()) {
-            Partition partition = entry.getValue();
-            skCase.addVolume(volumeSystem.getId(), 
-                    addr++, 
-                    partition.startingSector, 
-                    partition.partitionSize, 
-                    "Partition Type: " + partition.partitionType, 
-                    TskData.TSK_VS_PART_FLAG_ENUM.TSK_VS_PART_FLAG_ALLOC.getVsFlag(),
-                    transaction);
-            
-            System.out.printf("Added Volume: Start Sector=%d, Size=%d%n",
+            for (Map.Entry<Integer, Partition> entry : partitions.entrySet()) {          
+                Partition partition = entry.getValue();
+                if (partition.partitionType == 0x00) {
+                    
+                }
+                else {
+                    skCase.addVolume(volumeSystem.getId(),
+                            
+                        addr++, 
+                        partition.startingSector, 
+                        partition.partitionSize, 
+                        "Partition Type: " + String.format("0x%02X", partition.partitionType & 0xFF), 
+                        TskData.TSK_VS_PART_FLAG_ENUM.TSK_VS_PART_FLAG_ALLOC.getVsFlag(),
+                        transaction);
+                System.out.printf("Added Volume: Start Sector=%d, Size=%d%n",
                           partition.startingSector, partition.partitionSize);
+                }
+                
             }
             //transaction.commit();
         }
