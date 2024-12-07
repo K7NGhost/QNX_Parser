@@ -405,9 +405,11 @@ public class QNX6FS {
         System.out.printf("[-] Generating directory Listing && Auto Extracting Files to (./Extracted/Partition%d)%n", partitionID);
         long blocksize = ((Number) superBlock.get("blocksize")).longValue();
         long blksOffset = ((Number) superBlock.get("blks_offset")).longValue();
-        parseINodeDIRStruct(image, blocksize, blksOffset, partitionID);
-
+        parseINodeDIRStruct(image, blocksize, blksOffset, 1);
+        
+        System.out.printf("dirTree size: %d%n", dirTree.size());
         for (int i : dirTree.keySet()) {
+            System.out.println("Calling dump file");
             dumpFile(image, i, "./Extracted/", blocksize, blksOffset, partitionID);
         }
     }
@@ -429,7 +431,7 @@ public class QNX6FS {
                 if (dirID != dataINodeID) {
                     dirPath.insert(0, dirTree.get(dirID).get("Name") + File.separator);
                 }
-                dirID = Integer.parseInt((String) dirTree.get(dirID).get("ROOT_INODE"));
+                dirID = (int) dirTree.get(dirID).get("ROOT_INODE");
             }
 
             System.out.printf(" |--- [%s] \t %s%s%n", bytes2Human((long) inodeDataEntry.get("size")), dirPath, filename);
@@ -449,17 +451,23 @@ public class QNX6FS {
             if (!dir.exists()) {
                 dir.mkdirs();
             }
+            
 
             // Construct file path
             String filePath = fullDirPath + filename;
             File file = new File(filePath);
+            
+            // Print the full path of the output file
+            System.out.printf("===============================Output file path: %s%n", filePath);
+            System.out.println("Current working directory: " + System.getProperty("user.dir"));
             if (!file.exists()) {
                 batchProcessPTRS(physicalPTRs, inodeDataEntry, (int) inodeDataEntry.get("filelevels"), blksize, blkOffset, filePath, image, null);
             }
 
             // Update file's access and modification times
             if (file.exists()) {
-                file.setLastModified((long) inodeDataEntry.get("mtime") * 1000);
+                long mtime = ((Number) inodeDataEntry.get("mtime")).longValue();
+                file.setLastModified(mtime * 1000);
                 // Setting access time is not directly supported in Java's standard API
                 // FIX ME
             }
@@ -544,13 +552,18 @@ public class QNX6FS {
     public void parseINodeDIRStruct(Content image, long blksize, long blksOffset, int inodeID) throws IOException {
         // Get the inode entry from the tree
         Map<String, Object> inodeEntry = inodeTree.get(inodeID);
+        System.out.println("Processing inodeID: " + inodeID);
+        System.out.println("inodeEntry: " + inodeEntry);
 
         // Check if the inode exists and is a directory
         if (inodeEntry != null && inodeEntryIsDir((int) inodeEntry.get("mode"))) {
+            System.out.println("Inode is a directory");
 
             // Parse all 16 pointers in the inode entry
             List<Long> physicalPtrs = new ArrayList<>();
             int[] blockPtrs = (int[]) inodeEntry.get("block_ptr");
+            System.out.println("block_ptr array: " + Arrays.toString(blockPtrs));
+            
             for (int pointerIndex : blockPtrs) {
                 // Skip invalid pointers (0xFFFFFFFF)
                 if (pointerIndex != 0xFFFFFFFF) {
@@ -558,11 +571,13 @@ public class QNX6FS {
                     physicalPtrs.add((pointerIndex * blksize) + blksOffset);
                 }
             }
+            System.out.println("Physical pointers: " + physicalPtrs);
 
             // Process valid pointers for directories and files
             if (!physicalPtrs.isEmpty()) {
                 Map<String, Map<String, Object>> objects = parseInodeDirBatch(image, physicalPtrs, blksize, blksOffset);
-
+                System.out.println("Objects from parseInodeDirBatch: " + objects);
+                
                 // Find parent inode ID (".")
                 int rootID = 0;
                 for (Map.Entry<String, Map<String, Object>> entry : objects.entrySet()) {
@@ -572,6 +587,7 @@ public class QNX6FS {
                         break;
                     }
                 }
+                System.out.println("Root ID: " + rootID);
 
                 // Process all objects
                 for (Map.Entry<String, Map<String, Object>> entry : objects.entrySet()) {
@@ -580,7 +596,7 @@ public class QNX6FS {
 
                     if (!"..".equals(name) && !".".equals(name)) {
                         int ptr = (int) obj.get("PTR");
-                        
+                        System.out.println("Adding to dirTree: " + ptr + " -> " + name);
                         
                         // Create a map manually instead of using Map.of
                         Map<String, Object> dirEntry = new HashMap<>();
@@ -591,11 +607,15 @@ public class QNX6FS {
 
                         // Recursively process directories
                         if (ptr > 1) {
+                            System.out.println("Recursively processing inode: " + ptr);
                             parseINodeDIRStruct(image, blksize, blksOffset, ptr);
                         }
                     }
                 }
             }
+        }
+        else {
+            System.out.println("Inode is not a directory or does not exist.");
         }
     }
     
@@ -1112,7 +1132,7 @@ public class QNX6FS {
     
     // Method to check if an inode entry is a directory
     public boolean inodeEntryIsDir(int mode) {
-         return (mode & 0b1000000000000000) == 0b1000000000000000; // 040000 in octal
+         return (mode & 040000) == 040000; // Correct syntax for octal literals in Java
     }
     
     // Method to check if an inode entry is a regular file
