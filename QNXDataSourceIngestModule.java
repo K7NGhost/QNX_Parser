@@ -46,15 +46,14 @@ public class QNXDataSourceIngestModule implements DataSourceIngestModule {
             System.out.println("the transaction in process worked");
             QNXFile = new QNX6FS(dataSource);
             if (dataSource instanceof Image) {
-                QNXFile.getPartitions(skCase, transaction);
-                QNXFile.printPartitions();
+                QNXFile.processQNX(skCase, transaction);
             }
             else {
                 // Iterate over Content objects in the data source
                 for (Content content: dataSource.getChildren()) {
                     if (content instanceof Image) {
                         System.out.println("===================================Content Type: " + content.getClass().getName());
-                        QNXFile.getPartitions(skCase, transaction);
+                        QNXFile.processQNX(skCase, transaction);
                         QNXFile.printPartitions();
                     }
                 }
