@@ -34,12 +34,19 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.logging.Logger;
 import java.util.zip.CRC32;
+import org.sleuthkit.datamodel.LocalDirectory;
 
 import org.sleuthkit.datamodel.SleuthkitCase.CaseDbTransaction;
 import org.sleuthkit.datamodel.TskData;
 import org.sleuthkit.datamodel.VolumeSystem;
 
 public class QNX6FS {
+    VolumeSystem volumeSystem;
+    Volume volume;
+    SleuthkitCase skCase;
+    CaseDbTransaction transaction;
+    
+    
     public static final HashMap<String, Integer> PARTITION_MAGIC;
     private Map<Integer, Partition> nPartitionList = new HashMap<>();
     
@@ -83,12 +90,14 @@ public class QNX6FS {
     private Map<Integer, Map<String, Object>> dirTree = new HashMap<>();  // DirTree equivalent
 
     
-    public QNX6FS(Content content) {
+    public QNX6FS(Content content, SleuthkitCase skCase, CaseDbTransaction transaction) {
+        this.skCase = skCase;
+        this.transaction = transaction;
         this.content = content;
     }
     
-    public void processQNX(SleuthkitCase skCase, CaseDbTransaction transaction) throws TskCoreException, IOException {
-        getPartitions(content, skCase, transaction);
+    public void processQNX() throws TskCoreException, IOException {
+        getPartitions(content, this.skCase, this.transaction);
         printPartitions();
         for (Map.Entry<Integer, Partition> entry: nPartitionList.entrySet()) {
             Partition partition = entry.getValue();
@@ -297,7 +306,7 @@ public class QNX6FS {
     return partition;
 }
     
-    public void parseQNX(Content image, Map<String, Long> partition, int partitionID) throws IOException {
+    public void parseQNX(Content image, Map<String, Long> partition, int partitionID) throws IOException, TskCoreException {
         try (ReadContentInputStream fileIO = new ReadContentInputStream(image)) {
             // Calculate initial offsets
             long startingOffset = partition.get("StartingOffset");
@@ -375,7 +384,7 @@ public class QNX6FS {
         // TODO: create parseINODE 
     }
     
-    public void parseINODE(Content image, Map<String, Object> superBlock, int partitionID) throws IOException {
+    public void parseINODE(Content image, Map<String, Object> superBlock, int partitionID) throws IOException, TskCoreException {
         System.out.println("              |--+ Inode: Detected - Processing....");
 
         inodeTree = new HashMap<>();
@@ -414,7 +423,7 @@ public class QNX6FS {
         }
     }
     
-    public void dumpFile(Content image, int dataINodeID, String outputDirectory, long blksize, long blkOffset, int partitionID) throws IOException {
+    public void dumpFile(Content image, int dataINodeID, String outputDirectory, long blksize, long blkOffset, int partitionID) throws IOException, TskCoreException {
         // Get the inode data entry
         Map<String, Object> inodeDataEntry = inodeTree.get(dataINodeID);
 
@@ -433,6 +442,59 @@ public class QNX6FS {
                 }
                 dirID = (int) dirTree.get(dirID).get("ROOT_INODE");
             }
+            
+            // Create directory in Autopsy
+        long parentId = volume.getId();
+        long currentParentId = parentId;
+        Content currentParent = skCase.getContentById(parentId);
+        String[] directories = dirPath.toString().split(Pattern.quote(File.separator));
+
+        for (String directoryName : directories) {
+            if (!directoryName.isEmpty()) {
+                LocalDirectory dir = skCase.addLocalDirectory(
+                    currentParentId,
+                    directoryName,
+                    transaction
+                );
+                currentParentId = dir.getId();
+                currentParent = dir;
+            }
+        }
+        transaction.commit();
+
+        // Ensure parent directory is valid
+        if (currentParent == null) {
+            System.err.printf("Parent directory is null for path: %s%n", dirPath);
+            return;
+        }
+
+        // Add the file to Autopsy
+        if (!inodeEntryIsDir((int) inodeDataEntry.get("mode"))) {
+            // File metadata
+            long size = ((Number) inodeDataEntry.get("size")).longValue();
+            long ctime = ((Number) inodeDataEntry.getOrDefault("ctime", 0L)).longValue();
+            long crtime = ((Number) inodeDataEntry.getOrDefault("crtime", 0L)).longValue();
+            long atime = ((Number) inodeDataEntry.getOrDefault("atime", 0L)).longValue();
+            long mtime = ((Number) inodeDataEntry.getOrDefault("mtime", 0L)).longValue();
+
+            try {
+                skCase.addLocalFile(
+                    filename,
+                    outputDirectory,         // Local path
+                    size,
+                    ctime * 1000,            // ctime in milliseconds
+                    crtime * 1000,           // crtime in milliseconds
+                    atime * 1000,            // atime in milliseconds
+                    mtime * 1000,            // mtime in milliseconds
+                    true,                    // Is file
+                    TskData.EncodingType.NONE,
+                    currentParent,           // Parent directory content
+                    transaction
+                );
+            } catch (Exception e) {
+                System.err.printf("Failed to add file '%s' under parent ID %d: %s%n", filename, currentParentId, e.getMessage());
+            }
+        }
 
             System.out.printf(" |--- [%s] \t %s%s%n", bytes2Human((long) inodeDataEntry.get("size")), dirPath, filename);
 
@@ -1198,7 +1260,7 @@ public class QNX6FS {
         // Parent Id: the data source's object ID 
         long parentObjId = dataSource.getId();
         try {
-            VolumeSystem volumeSystem = skCase.addVolumeSystem(parentObjId, TskData.TSK_VS_TYPE_ENUM.TSK_VS_TYPE_UNSUPP, 0, sectorSize, transaction);
+            this.volumeSystem = skCase.addVolumeSystem(parentObjId, TskData.TSK_VS_TYPE_ENUM.TSK_VS_TYPE_UNSUPP, 0, sectorSize, transaction);
             System.out.println("VolumeSystem created with ID: " + volumeSystem.getId());
             // Step 2: Add each partition as a Volume
             long addr = 0;
@@ -1207,7 +1269,7 @@ public class QNX6FS {
                 if (partition.partitionType == 0x00) {
                 }
                 else {
-                    skCase.addVolume(volumeSystem.getId(),
+                    this.volume = skCase.addVolume(volumeSystem.getId(),
                             
                         addr++, 
                         partition.startingSector, 
