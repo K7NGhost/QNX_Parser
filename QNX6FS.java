@@ -43,10 +43,11 @@ import org.sleuthkit.datamodel.VolumeSystem;
 
 public class QNX6FS {
     VolumeSystem volumeSystem;
-    Volume volume;
-    Content currentVolume;
+    ArrayList<Volume> volumes;
+    Volume currentVolume;
     SleuthkitCase skCase;
     CaseDbTransaction transaction;
+    Content currentParent;
     
     
     public static final HashMap<String, Integer> PARTITION_MAGIC;
@@ -101,8 +102,7 @@ public class QNX6FS {
         this.transaction = transaction;
         getPartitions(content, skCase, transaction);
         printPartitions();
-        List<Content> volumes = this.volumeSystem.getChildren();
-        Content currVolume;
+        System.out.println("The amount of volumes in the list are: " + volumes.size());
         int counter = 0;
         for (Map.Entry<Integer, Partition> entry: nPartitionList.entrySet()) {
             Partition partition = entry.getValue();
@@ -114,8 +114,11 @@ public class QNX6FS {
                 continue;
             }
             else {
-                currVolume = volumes.get(counter);
-                currentVolume = currVolume;
+                this.currentVolume = volumes.get(counter);
+                Content partitionRootDir = skCase.addLocalDirectory(currentVolume.getId(), "Partition" + currentVolume.getName(), transaction);
+                Content currentParent = partitionRootDir;
+                this.currentParent = currentParent;
+                System.out.println("The current volume is: " + currentVolume.getName() + " and the id is: " + currentVolume.getId());
                 counter++;
                 // Create the required partition map
                 Map<String, Long> partitionMap = new HashMap<>();
@@ -438,7 +441,8 @@ public class QNX6FS {
         System.out.printf("dirTree size: %d%n", dirTree.size());
         for (int i : dirTree.keySet()) {
             System.out.println("Calling dump file");
-            dumpFile(image, i, "./Extracted/", blocksize, blksOffset, partitionID);
+            String outputDirectory = "." + File.separator + "Extracted" + File.separator;
+            dumpFile(image, i, outputDirectory, blocksize, blksOffset, partitionID);
         }
     }
     
@@ -461,58 +465,6 @@ public class QNX6FS {
                 }
                 dirID = (int) dirTree.get(dirID).get("ROOT_INODE");
             }
-            
-            long parentId = currentVolume.getId();
-        long currentParentId = parentId;
-        Content currentParent = skCase.getContentById(parentId);
-        String[] directories = dirPath.toString().split(Pattern.quote(File.separator));
-
-        for (String directoryName : directories) {
-            if (!directoryName.isEmpty()) {
-                LocalDirectory dir = skCase.addLocalDirectory(
-                    currentParentId,
-                    directoryName,
-                    transaction
-                );
-                currentParentId = dir.getId();
-                currentParent = dir;
-            }
-        }
-        transaction.commit();
-
-        // Ensure parent directory is valid
-//        if (currentParent == null) {
-//            System.err.printf("Parent directory is null for path: %s%n", dirPath);
-//            return;
-//        }
-
-        // Add the file to Autopsy
-        if (!inodeEntryIsDir((int) inodeDataEntry.get("mode"))) {
-            // File metadata
-            long size = ((Number) inodeDataEntry.get("size")).longValue();
-            long ctime = ((Number) inodeDataEntry.getOrDefault("ctime", 0L)).longValue();
-            long crtime = ((Number) inodeDataEntry.getOrDefault("crtime", 0L)).longValue();
-            long atime = ((Number) inodeDataEntry.getOrDefault("atime", 0L)).longValue();
-            long mtime = ((Number) inodeDataEntry.getOrDefault("mtime", 0L)).longValue();
-
-            try {
-                skCase.addLocalFile(
-                    filename,
-                    outputDirectory,         // Local path
-                    size,
-                    ctime * 1000,            // ctime in milliseconds
-                    crtime * 1000,           // crtime in milliseconds
-                    atime * 1000,            // atime in milliseconds
-                    mtime * 1000,            // mtime in milliseconds
-                    true,                    // Is file
-                    TskData.EncodingType.NONE,
-                    currentParent,           // Parent directory content
-                    transaction
-                );
-            } catch (Exception e) {
-                System.err.printf("Failed to add file '%s' under parent ID %d: %s%n", filename, currentParentId, e.getMessage());
-            }
-        }
 
             System.out.printf(" |--- [%s] \t %s%s%n", bytes2Human((long) inodeDataEntry.get("size")), dirPath, filename);
 
@@ -551,8 +503,48 @@ public class QNX6FS {
                 // Setting access time is not directly supported in Java's standard API
                 // FIX ME
             }
+            
+            // === Add to Autopsy ===
+
+            // Start adding directories and file to Autopsy
+            
+            String[] directories = dirPath.toString().split(Pattern.quote(File.separator));
+            for (String directoryName : directories) {
+                if (!directoryName.isEmpty()) {
+                LocalDirectory autopsyDir = skCase.addLocalDirectory(currentParent.getId(), directoryName, transaction);
+                currentParent = autopsyDir;
+                }
+            }
+
+            // File metadata
+            long size = ((Number) inodeDataEntry.get("size")).longValue();
+            long ctime = ((Number) inodeDataEntry.getOrDefault("ctime", 0L)).longValue();
+            long crtime = ((Number) inodeDataEntry.getOrDefault("crtime", 0L)).longValue();
+            long atime = ((Number) inodeDataEntry.getOrDefault("atime", 0L)).longValue();
+            long mtimeVal = ((Number) inodeDataEntry.getOrDefault("mtime", 0L)).longValue();
+
+            // Add the file to Autopsy
+            try {
+                skCase.addLocalFile(
+                    filename,
+                    filePath,                // The local extracted file path
+                    size,
+                    ctime * 1000,
+                    crtime * 1000,
+                    atime * 1000,
+                    mtimeVal * 1000,
+                    true,
+                    TskData.EncodingType.NONE,
+                    currentParent,
+                    transaction
+                );
+            }   catch (Exception e) {
+                System.err.printf("Failed to add file '%s' under parent ID %d: %s%n", filename, currentParent.getId(), e.getMessage());
+            }
+           
         }
     }
+
     
     public void batchProcessPTRS(List<Long> ptrs, Map<String, Object> inodeDataEntry, int level, long blksize, long blkOffset, String path, Content image, RandomAccessFile io) throws IOException {
         ReadContentInputStream fileIO = new ReadContentInputStream(image);
@@ -1304,9 +1296,9 @@ public class QNX6FS {
         // Parent Id: the data source's object ID 
         long parentObjId = dataSource.getId();
         try {
-            VolumeSystem volumeSystem = skCase.addVolumeSystem(parentObjId, TskData.TSK_VS_TYPE_ENUM.TSK_VS_TYPE_UNSUPP, 0, sectorSize, transaction);
-            this.volumeSystem = volumeSystem;
+            this.volumeSystem = skCase.addVolumeSystem(parentObjId, TskData.TSK_VS_TYPE_ENUM.TSK_VS_TYPE_UNSUPP, 0, sectorSize, transaction);
             System.out.println("VolumeSystem created with ID: " + volumeSystem.getId());
+            this.volumes = new ArrayList<>();
             // Step 2: Add each partition as a Volume
             long addr = 0;
             for (Map.Entry<Integer, Partition> entry : partitions.entrySet()) {          
@@ -1314,18 +1306,15 @@ public class QNX6FS {
                 if (partition.partitionType == 0x00) {
                 }
                 else {
-                    Volume volume =skCase.addVolume(volumeSystem.getId(),
-                            
-                        addr++, 
-                        partition.startingSector, 
-                        partition.partitionSize, 
-                        "Partition Type: " + String.format("0x%02X", partition.partitionType & 0xFF), 
-                        TskData.TSK_VS_PART_FLAG_ENUM.TSK_VS_PART_FLAG_ALLOC.getVsFlag(),
-                        transaction);
-                System.out.printf("Added Volume: Start Sector=%d, Size=%d%n",
-                          partition.startingSector, partition.partitionSize);
-                          
-                    this.volume = volume;
+                    Volume volume = skCase.addVolume(this.volumeSystem.getId(), 
+                            addr++, 
+                            partition.startingSector, 
+                            partition.partitionSize, 
+                            "Partition Type: " + String.format("0x%02X", partition.partitionType & 0xFF), 
+                            TskData.TSK_VS_PART_FLAG_ENUM.TSK_VS_PART_FLAG_ALLOC.getVsFlag(), 
+                            transaction);
+                    System.out.printf("Added Volume: Start Sector=%d, Size=%d, ID=%d", partition.startingSector, partition.partitionSize, volume.getId());
+                    volumes.add(volume);       
                 }
                 
             }
