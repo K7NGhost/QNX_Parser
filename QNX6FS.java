@@ -35,6 +35,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.logging.Logger;
 import java.util.zip.CRC32;
+import org.sleuthkit.autopsy.casemodule.Case;
+import org.sleuthkit.autopsy.casemodule.NoCurrentCaseException;
 import org.sleuthkit.datamodel.LocalDirectory;
 
 import org.sleuthkit.datamodel.SleuthkitCase.CaseDbTransaction;
@@ -48,6 +50,8 @@ public class QNX6FS {
     SleuthkitCase skCase;
     CaseDbTransaction transaction;
     Content currentParent;
+    private Map<String, LocalDirectory> createdDirectories = new HashMap<>();
+    String sOutputDirectory;
     
     
     public static final HashMap<String, Integer> PARTITION_MAGIC;
@@ -97,7 +101,7 @@ public class QNX6FS {
         this.content = content;
     }
     
-    public void processQNX(SleuthkitCase skCase, CaseDbTransaction transaction) throws TskCoreException, IOException {
+    public void processQNX(SleuthkitCase skCase, CaseDbTransaction transaction) throws TskCoreException, IOException, NoCurrentCaseException {
         this.skCase = skCase;
         this.transaction = transaction;
         getPartitions(content, skCase, transaction);
@@ -114,6 +118,7 @@ public class QNX6FS {
                 continue;
             }
             else {
+                createdDirectories.clear();
                 this.currentVolume = volumes.get(counter);
                 Content partitionRootDir = skCase.addLocalDirectory(currentVolume.getId(), "Partition" + currentVolume.getName(), transaction);
                 Content currentParent = partitionRootDir;
@@ -321,7 +326,7 @@ public class QNX6FS {
     return partition;
 }
     
-    public void parseQNX(Content image, Map<String, Long> partition, int partitionID) throws IOException, TskCoreException {
+    public void parseQNX(Content image, Map<String, Long> partition, int partitionID) throws IOException, TskCoreException, NoCurrentCaseException {
         try (ReadContentInputStream fileIO = new ReadContentInputStream(image)) {
             // Calculate initial offsets
             
@@ -383,12 +388,30 @@ public class QNX6FS {
                     // Print superblock information and parse additional components
                     printSuperBlockInfo(activeSuperBlock);
                     parseBitmap(image, activeSuperBlock);
+                    // Get the current case directory and construct the output directory
+                    Case currentCase = Case.getCurrentCaseThrows(); // Get the current Autopsy case
+                    String caseDirectory = currentCase.getExportDirectory(); // Case export directory
+                    String outputDirectory = caseDirectory + File.separator + "Extracted" + File.separator + "Partition" + partitionID + File.separator;
+
+                    // Ensure the output directory exists
+                    File dir = new File(outputDirectory);
+                    if (!dir.exists()) {
+                        dir.mkdirs();
+                        }
+                    
                     Map<Integer, String> longNames = new HashMap<>();
                     this.longNames = parseLongFileNames(image, activeSuperBlock);
                     longNames = this.longNames;
                     // Iterate through the map and print the key (formatted as hexadeciam) and value
                     if (longNames != null) {
                         for (Map.Entry<Integer, String> entry : longNames.entrySet()) {
+                            int inodeID = entry.getKey();
+                            String longFileName = entry.getValue();
+                            if (inodeTree.containsKey(inodeID)) {
+                                System.out.printf("Processing long file: %s (inode: %02x)%n", longFileName, inodeID);
+                                dumpFile(image, inodeID, outputDirectory, (int) superBlock.get("blocksize"), (long) superBlock.get("blks_offset"), partitionID);
+
+                            }
                             System.out.printf("%02x: %s%n", entry.getKey(), entry.getValue());
                         }
                     }
@@ -406,7 +429,7 @@ public class QNX6FS {
         // TODO: create parseINODE 
     }
     
-    public void parseINODE(Content image, Map<String, Object> superBlock, int partitionID) throws IOException, TskCoreException {
+    public void parseINODE(Content image, Map<String, Object> superBlock, int partitionID) throws IOException, TskCoreException, NoCurrentCaseException {
         System.out.println("              |--+ Inode: Detected - Processing....");
 
         inodeTree = new HashMap<>();
@@ -438,12 +461,39 @@ public class QNX6FS {
         long blksOffset = ((Number) superBlock.get("blks_offset")).longValue();
         parseINodeDIRStruct(image, blocksize, blksOffset, 1);
         
+        // Determine Autopsy case output directory
+        Case currentCase = Case.getCurrentCaseThrows(); // Get current case
+        String caseDirectory = currentCase.getExportDirectory(); // Get the export directory for the case
+        String outputDirectory = caseDirectory + File.separator + "Extracted" + File.separator + "Partition" + partitionID + File.separator;
+        
+        // Ensure the output directory exists
+        File outputDir = new File(outputDirectory);
+        if (!outputDir.exists()) {
+            outputDir.mkdirs();
+        }
+        
         System.out.printf("dirTree size: %d%n", dirTree.size());
         for (int i : dirTree.keySet()) {
             System.out.println("Calling dump file");
-            String outputDirectory = "." + File.separator + "Extracted" + File.separator;
             dumpFile(image, i, outputDirectory, blocksize, blksOffset, partitionID);
         }
+    }
+    
+    public String getOutputDirectory() throws TskCoreException, NoCurrentCaseException {
+        // Get the current case directory
+        Case currentCase = Case.getCurrentCaseThrows();
+        String caseDirectory = currentCase.getExportDirectory();
+        
+        // Define the plugin-specific subdirectory
+        String outputDirectory = caseDirectory + File.separator + "QNX_Extracted" + File.separator;
+        
+        // Ensure the directory exists
+        File outputDir = new File(outputDirectory);
+        if (!outputDir.exists()) {
+            outputDir.mkdirs();
+        }
+        return outputDirectory;
+
     }
     
     public void dumpFile(Content image, int dataINodeID, String outputDirectory, long blksize, long blkOffset, int partitionID) throws IOException, TskCoreException {
@@ -451,8 +501,12 @@ public class QNX6FS {
         Map<String, Object> inodeDataEntry = inodeTree.get(dataINodeID);
 
         if (inodeDataEntry != null && !inodeEntryIsDir((int) inodeDataEntry.get("mode"))) {
+            if (!dirTree.containsKey(dataINodeID)) {
+                System.err.printf("Error: dataINodeID %d not found in dirTree.%n", dataINodeID);
+                return;
+            }
             String filename = (String) dirTree.get(dataINodeID).get("Name");
-
+            
             // Create directory path
             StringBuilder dirPath = new StringBuilder();
             int dirID = dataINodeID;
@@ -478,7 +532,7 @@ public class QNX6FS {
             }
 
             // Create output directory if it doesn't exist
-            String fullDirPath = outputDirectory + "Partition" + partitionID + File.separator + dirPath;
+            String fullDirPath = outputDirectory + dirPath;
             File dir = new File(fullDirPath);
             if (!dir.exists()) {
                 dir.mkdirs();
@@ -509,12 +563,32 @@ public class QNX6FS {
             // Start adding directories and file to Autopsy
             
             String[] directories = dirPath.toString().split(Pattern.quote(File.separator));
+            StringBuilder fullPathBuilder = new StringBuilder();
+            
+            // Start with the root directory as the current parent
+            LocalDirectory partitionRootDir = (LocalDirectory) currentParent;
+            LocalDirectory parentDir = partitionRootDir;
+            
+            
             for (String directoryName : directories) {
                 if (!directoryName.isEmpty()) {
-                LocalDirectory autopsyDir = skCase.addLocalDirectory(currentParent.getId(), directoryName, transaction);
-                currentParent = autopsyDir;
+                    fullPathBuilder.append(directoryName).append(File.separator);
+                    String fullPath = fullPathBuilder.toString();
+                    
+                    if (!createdDirectories.containsKey(fullPath)) {
+                        LocalDirectory newDir = skCase.addLocalDirectory(parentDir.getId(), directoryName, transaction);
+                        createdDirectories.put(fullPath, newDir);
+                        parentDir = newDir;
+                    }
+                    else {
+                        // Reuse existing directory
+                        parentDir = createdDirectories.get(fullPath);
+                    }
+                
                 }
             }
+            
+            currentParent = parentDir;
 
             // File metadata
             long size = ((Number) inodeDataEntry.get("size")).longValue();
@@ -538,6 +612,7 @@ public class QNX6FS {
                     currentParent,
                     transaction
                 );
+                System.out.printf("Passed to Autopsy: %s%n", filePath);
             }   catch (Exception e) {
                 System.err.printf("Failed to add file '%s' under parent ID %d: %s%n", filename, currentParent.getId(), e.getMessage());
             }
@@ -871,7 +946,7 @@ public class QNX6FS {
             return null;
         }
         
-        List<Map<String, String>> longnames = new ArrayList<>();
+        List<Map<Integer, String>> longnames = new ArrayList<>();
         
         // Process each pointer
         for (int n = 0; n < 16; n++) {
@@ -893,9 +968,9 @@ public class QNX6FS {
         Map<Integer, String> dict = new HashMap<>();
         int count = 1;
         
-        for (Map<String, String> nameMap : longnames) {
+        for (Map<Integer, String> nameMap : longnames) {
             if (nameMap != null) {
-                for (Map.Entry<String, String> entry : nameMap.entrySet()) {
+                for (Map.Entry<Integer, String> entry : nameMap.entrySet()) {
                     if (entry.getValue() != null) {
                         dict.put(count, entry.getValue());
                         count++;
@@ -906,7 +981,7 @@ public class QNX6FS {
         return dict;
     }
     
-    public Map<String, String> parseQNX6LongFilename(Content image, long ptr, int level, long blksize, long blksOffset) throws IOException { 
+    public Map<Integer, String> parseQNX6LongFilename(Content image, long ptr, int level, long blksize, long blksOffset) throws IOException { 
         ReadContentInputStream fileIO = new ReadContentInputStream(image);
         
         // Seek to the appropriate location
@@ -921,7 +996,7 @@ public class QNX6FS {
         byte[] handle = new byte[512];
         fileIO.read(handle);
 
-        Map<String, String> logFilenameNode = new HashMap<>();
+        Map<Integer, String> logFilenameNode = new HashMap<>();
         
         if (level == 0) {
             // Extract size
@@ -939,12 +1014,10 @@ public class QNX6FS {
                     filename.append((char) b);
                 }
                 
-                logFilenameNode.put(String.valueOf(ptr), filename.toString().trim());
-                return logFilenameNode;
+                logFilenameNode.put((int)ptr, filename.toString().trim());
             }
             else {
                 System.err.println("Error: Invalid size (" + size + ") for ptr: " + ptr);
-                return null;
             }
         }
         else {
@@ -958,14 +1031,9 @@ public class QNX6FS {
             // Recursively process pointers 
             for (int i = 0; i < 128; i++) {
                 if (checkQNX6blkptr(pointers[i])) {
-                    Map<String, String> name = parseQNX6LongFilename(image, pointers[i], level - 1, blksize, blksOffset);
+                    Map<Integer, String> name = parseQNX6LongFilename(image, pointers[i], level - 1, blksize, blksOffset);
                     if (name != null) {
-                        if (level >= 1) {
-                            logFilenameNode.put(String.valueOf(pointers[i]), name.get(String.valueOf(pointers[i])));                          
-                        }
-                        else {
-                            logFilenameNode.put(String.valueOf(pointers[i]), name.toString());
-                        }
+                        logFilenameNode.putAll(name);
                     }
                 }
             } 
