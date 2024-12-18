@@ -237,7 +237,6 @@ public class QNX6FS {
                 System.out.println("[-] (EBR) Extended Boot Record Detected, Processing....");
                 Map<Integer, Partition> extendedPartitions = parseExtendedPartitions(image, partition.startingSector, partition.sectorSize);
                 partitionList.putAll(extendedPartitions);
-                // Additional logic would go here for parsing extended partitions.
                 
             } else if (partitionID == 0xB1 || partitionID == 0xB2 || partitionID == 0xB3 || partitionID == 0xB4) {
                 System.out.printf("[+] Supported QNX6FS Partition Detected @ %02x%n", partition.startingOffset);
@@ -399,6 +398,8 @@ public class QNX6FS {
                         dir.mkdirs();
                         }
                     
+                    parseINODE(image, activeSuperBlock, partitionID);
+                    
                     Map<Integer, String> longNames = new HashMap<>();
                     this.longNames = parseLongFileNames(image, activeSuperBlock);
                     longNames = this.longNames;
@@ -415,8 +416,6 @@ public class QNX6FS {
                             System.out.printf("%02x: %s%n", entry.getKey(), entry.getValue());
                         }
                     }
-                    
-                    parseINODE(image, activeSuperBlock, partitionID);
                     
                 }
             }
@@ -454,12 +453,16 @@ public class QNX6FS {
                 parseQNX6Inode(ptr, (int) inode.get("level"), blocksize, blksOffset, image);
             }
         }
+        
+        // Retrieve long filenames
+        System.out.println("              |--+ Processing Long Filenames...");
+        Map<Integer,String> longNames = parseLongFileNames(image, superBlock);
 
         // Generate directory listing and extract files
         System.out.printf("[-] Generating directory Listing && Auto Extracting Files to (./Extracted/Partition%d)%n", partitionID);
         long blocksize = ((Number) superBlock.get("blocksize")).longValue();
         long blksOffset = ((Number) superBlock.get("blks_offset")).longValue();
-        parseINodeDIRStruct(image, blocksize, blksOffset, 1);
+        parseINodeDIRStruct(image, blocksize, blksOffset, 1, longNames);
         
         // Determine Autopsy case output directory
         Case currentCase = Case.getCurrentCaseThrows(); // Get current case
@@ -704,7 +707,7 @@ public class QNX6FS {
         return String.format("%.1f %s", value, symbols[symbols.length - 1]);
     }
     
-    public void parseINodeDIRStruct(Content image, long blksize, long blksOffset, int inodeID) throws IOException {
+    public void parseINodeDIRStruct(Content image, long blksize, long blksOffset, int inodeID, Map<Integer, String> longNames) throws IOException {
         // Get the inode entry from the tree
         Map<String, Object> inodeEntry = inodeTree.get(inodeID);
         System.out.println("Processing inodeID: " + inodeID);
@@ -751,6 +754,11 @@ public class QNX6FS {
 
                     if (!"..".equals(name) && !".".equals(name)) {
                         int ptr = (int) obj.get("PTR");
+                        // Check for long filename
+                        if (longNames.containsKey(ptr)) {
+                            name = longNames.get(ptr);
+                            System.out.println("Using long filename: " + name);
+                        }
                         System.out.println("Adding to dirTree: " + ptr + " -> " + name);
                         
                         // Create a map manually instead of using Map.of
@@ -763,7 +771,7 @@ public class QNX6FS {
                         // Recursively process directories
                         if (ptr > 1) {
                             System.out.println("Recursively processing inode: " + ptr);
-                            parseINodeDIRStruct(image, blksize, blksOffset, ptr);
+                            parseINodeDIRStruct(image, blksize, blksOffset, ptr, longNames);
                         }
                     }
                 }
