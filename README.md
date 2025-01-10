@@ -1,4 +1,4 @@
-# QNX Parser for Autopsy
+# QNX Parser plugin for Autopsy
 
 A plugin for the Autopsy digital forensics platform that parses QNX6 image files and provides a tree directory structure. This tool is designed to help investigators analyze QNX-based Systems efficiently.
 
