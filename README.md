@@ -21,4 +21,4 @@ Contributions are welcome, as of now it is not complete so any help is welcome.
 
 Wouldn't have been able to do this project with the hard work of the following project and its contributors:
 - Was looking for the reference but couldn't find it ¯\_(ツ)_/¯
-- Inspiration for QNX parsing and understanding of the QNX system is thanks to the reasearch of this repository (https://github.com/jdbonfils/QNX6FS-Parser-Ingest-Module?tab=readme-ov-file)
+- Inspiration for QNX parsing and understanding of the QNX system is thanks to the research of this repository (https://github.com/jdbonfils/QNX6FS-Parser-Ingest-Module?tab=readme-ov-file)
