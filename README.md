@@ -4,8 +4,8 @@ A plugin for the Autopsy digital forensics platform that parses QNX6 image files
 
 ## Features
 
-- Parses QNX6 disk image and extracts it into a folder called extracted
-- Displays the files and directores in the tree viewer
+- Parses QNX6 disk image and extracts it into a folder called extracted (except longfilenames gosh darn)
+- Displays the files and directores in the tree viewer (work in progress)
 
 ## Usage
 
