@@ -111,13 +111,26 @@ public class QNX6FS {
         printPartitions();
         System.out.println("The amount of volumes in the list are: " + volumes.size());
         int counter = 0;
+        
+        // Uncomment and modify this list to specify which partitions to process
+        //List<Integer> partitionsToProcess = Arrays.asList(13, 14); // Example partition IDs
+        
         for (Map.Entry<Integer, Partition> entry: nPartitionList.entrySet()) {
             Partition partition = entry.getValue();
             int partitionID = partition.partitionType & 0xFF;
+            System.out.printf("===============Partition %d:%n", entry.getKey());
+            
+            // Uncomment this block to process only specified partitions
+//            if (!partitionsToProcess.contains(entry.getKey())) {
+//                continue;
+//            }
+            
             if (partitionID == 0x05 || partitionID == 0x0F) {
+                System.out.println("ERRRRRRRRROOOOOOOOOOOOORRRRRRRRRR");
                 continue;
             }
             if (partition.partitionType == 0x00 | partition.partitionType == 0x0F) {
+                System.out.println("ERRRRRRRRROOOOOOOOOOOOORRRRRRRRRR");
                 continue;
             }
             else {
@@ -133,6 +146,7 @@ public class QNX6FS {
                 partitionMap.put("StartingOffset", partition.startingOffset);
                 partitionMap.put("EndOffset", partition.endOffset);
                 partitionMap.put("Size", (long) partition.partitionSize);
+                System.out.println("Processing the partition");
                 parseQNX(content, partitionMap, entry.getKey());
             }
         }
@@ -359,6 +373,7 @@ public class QNX6FS {
                 superBlock = parseQNX6SuperBlock(data, startingOffset);
             }
             
+            System.out.println("Magic value for partition " + partitionID + ": " + (int) superBlock.get("magic"));
             // Validate the superblock's magic value
             if ((int) superBlock.get("magic") == PARTITION_MAGIC.get("QNX6")) {
                 System.out.printf(" |---+ First SuperBlock Detected ( Serial: %s ) @ %02x%n",
@@ -372,20 +387,30 @@ public class QNX6FS {
                 fileIO.read(data);
                 Map<String, Object> blkSuperBlock = parseQNX6SuperBlock(data, startingOffset);
                 
+                System.out.println("Magic value for partition " + partitionID + ": " + (int) blkSuperBlock.get("magic"));
+                
                 // validate backup superblock
-                if ((int) blkSuperBlock.get("magic") == PARTITION_MAGIC.get("QNX6")) {
-                    System.out.printf("     |---+ Second SuperBlock Detected ( Serial: %s ) @ %02x%n",
-                            blkSuperBlock.get("serial"), backupSuperBlockOffset);
-
-                    // Determine the active superblock
+                if ((int) blkSuperBlock.get("magic") == PARTITION_MAGIC.get("QNX6") || (int) blkSuperBlock.get("magic") == 0) {
                     Map<String, Object> activeSuperBlock;
-                    if ((long) blkSuperBlock.get("serial") < (long) superBlock.get("serial")) {
-                        activeSuperBlock = superBlock;
-                        System.out.println("         |---+ Using First SuperBlock as Active Block");
-                    } else {
-                        activeSuperBlock = blkSuperBlock;
-                        System.out.println("         |---+ Using Second SuperBlock as Active Block");
+                    if (!((int)blkSuperBlock.get("magic") == 0)) {
+                        System.out.printf("     |---+ Second SuperBlock Detected ( Serial: %s ) @ %02x%n",
+                            blkSuperBlock.get("serial"), backupSuperBlockOffset);
+                        // Determine the active superblock
+                        if ((long) blkSuperBlock.get("serial") < (long) superBlock.get("serial")) {
+                            activeSuperBlock = superBlock;
+                            System.out.println("         |---+ Using First SuperBlock as Active Block");
+                        }
+                        else {
+                            activeSuperBlock = blkSuperBlock;
+                            System.out.println("         |---+ Using Second SuperBlock as Active Block");
+                        }
                     }
+                    else {
+                        activeSuperBlock = superBlock;
+                    }
+                    
+                    
+                    
                     
                     // Print superblock information and parse additional components
                     printSuperBlockInfo(activeSuperBlock);
