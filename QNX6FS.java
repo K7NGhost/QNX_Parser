@@ -28,9 +28,11 @@ import java.util.regex.Pattern;
 import java.util.regex.Matcher;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.logging.Logger;
@@ -95,6 +97,7 @@ public class QNX6FS {
     private Map<Integer, Map<String, Object>> inodeTree = new HashMap<>();
     private Map<Integer, String> longNames = new HashMap<>();
     private Map<Integer, Map<String, Object>> dirTree = new HashMap<>();  // DirTree equivalent
+    private List<Map<String, Object>> dirEntries = new ArrayList<>();
 
     
     public QNX6FS(Content content) {
@@ -108,13 +111,26 @@ public class QNX6FS {
         printPartitions();
         System.out.println("The amount of volumes in the list are: " + volumes.size());
         int counter = 0;
+        
+        // Uncomment and modify this list to specify which partitions to process
+        //List<Integer> partitionsToProcess = Arrays.asList(13, 14); // Example partition IDs
+        
         for (Map.Entry<Integer, Partition> entry: nPartitionList.entrySet()) {
             Partition partition = entry.getValue();
             int partitionID = partition.partitionType & 0xFF;
+            System.out.printf("===============Partition %d:%n", entry.getKey());
+            
+            // Uncomment this block to process only specified partitions
+//            if (!partitionsToProcess.contains(entry.getKey())) {
+//                continue;
+//            }
+            
             if (partitionID == 0x05 || partitionID == 0x0F) {
+                System.out.println("ERRRRRRRRROOOOOOOOOOOOORRRRRRRRRR");
                 continue;
             }
             if (partition.partitionType == 0x00 | partition.partitionType == 0x0F) {
+                System.out.println("ERRRRRRRRROOOOOOOOOOOOORRRRRRRRRR");
                 continue;
             }
             else {
@@ -130,6 +146,7 @@ public class QNX6FS {
                 partitionMap.put("StartingOffset", partition.startingOffset);
                 partitionMap.put("EndOffset", partition.endOffset);
                 partitionMap.put("Size", (long) partition.partitionSize);
+                System.out.println("Processing the partition");
                 parseQNX(content, partitionMap, entry.getKey());
             }
         }
@@ -231,8 +248,16 @@ public class QNX6FS {
             // Sector Size - Assumes a standard 512 bytes per sector
             partition.sectorSize = 512;
             partition.qnx6 = false;
-
+            
             int partitionID = partition.partitionType & 0xFF;
+            if (partitionID == 0xEE) {
+                System.out.println("GPT Protective MBR detected. Parsing GPT...");
+                Map<Integer, Partition> gptPartitions = parseGPT(image, partition.startingSector);
+                partitionList.putAll(gptPartitions);
+                continue;
+                // TODO: add parseGPT(image); call a method to parse the GPT instead of skpping
+                
+            }
             if (partitionID == 0x05 || partitionID == 0x0F) {
                 System.out.println("[-] (EBR) Extended Boot Record Detected, Processing....");
                 Map<Integer, Partition> extendedPartitions = parseExtendedPartitions(image, partition.startingSector, partition.sectorSize);
@@ -250,6 +275,76 @@ public class QNX6FS {
         nPartitionList = partitionList;
         return partitionList;
     }
+    
+private Map<Integer, Partition> parseGPT(Content image, long startingSector) throws IOException {
+    Map<Integer, Partition> gptPartitions = new HashMap<>();
+    ReadContentInputStream inputStream = new ReadContentInputStream(image);
+    byte[] sector = new byte[512];
+
+    // Instead of always reading LBA 1 of the *entire disk*,
+    // adjust by 'startingSector' if the GPT is located at
+    // an offset partition within the disk.
+    long gptHeaderOffset = 1L * 512L; // Absolute LBA 1
+    inputStream.seek(gptHeaderOffset);
+    inputStream.read(sector);
+
+    ByteBuffer buffer = ByteBuffer.wrap(sector).order(ByteOrder.LITTLE_ENDIAN);
+    long signature = buffer.getLong(0); // GPT Signature
+    if (signature != 0x5452415020494645L) { // "EFI PART"
+        System.err.println("Invalid GPT header signature.");
+        return gptPartitions;
+    }
+
+    int numPartitionEntries = buffer.getInt(80);   // Number of partition entries
+    int partitionEntrySize  = buffer.getInt(84);   // Size of each partition entry
+    long partitionArrayLBA  = buffer.getLong(72);  // Starting LBA of partition array
+
+    // The partition array should also be offset by the same 'startingSector'
+    // if the GPT is not at the absolute beginning of the disk.
+    long partitionArrayOffset = 2L * 512L;
+
+    // Read Partition Entries
+    inputStream.seek(partitionArrayOffset);
+    byte[] partitionArray = new byte[numPartitionEntries * partitionEntrySize];
+    inputStream.read(partitionArray);
+
+    for (int i = 0; i < numPartitionEntries; i++) {
+        int entryOffset = i * partitionEntrySize;
+        ByteBuffer entryBuffer = ByteBuffer.wrap(partitionArray, entryOffset, partitionEntrySize)
+                                          .order(ByteOrder.LITTLE_ENDIAN);
+
+        long startingLBA = entryBuffer.getLong(32); // Starting LBA
+        long endingLBA   = entryBuffer.getLong(40); // Ending LBA
+        if (startingLBA == 0 && endingLBA == 0) {
+            continue; // Empty entry
+        }
+
+        byte[] partitionNameBytes = new byte[72];
+        entryBuffer.position(56); // Partition name starts at offset 56
+        entryBuffer.get(partitionNameBytes);
+        String partitionName = new String(partitionNameBytes, "UTF-16LE").trim();
+
+        Partition partition = new Partition();
+        partition.startingSector = (int) (startingLBA + startingSector);
+        partition.endingSector   = (int) (endingLBA   + startingSector);
+
+        partition.startingOffset = (startingLBA + startingSector) * 512L;
+        partition.endOffset      = (endingLBA   + startingSector) * 512L;
+        partition.partitionSize  = (int) (endingLBA - startingLBA + 1);
+        partition.sectorSize     = 512;
+
+        System.out.printf(
+            "GPT Partition %d: Start LBA=%d, End LBA=%d, Name=%s%n",
+            i + 1, partition.startingSector, partition.endingSector, partitionName
+        );
+
+        gptPartitions.put(i + 1, partition);
+    }
+
+    return gptPartitions;
+}
+
+
     
     private Map<Integer, Partition> parseExtendedPartitions(Content image, long extendedPartitionStart, int sectorSize) throws IOException {
     Map<Integer, Partition> partitionList = new HashMap<>();
@@ -356,6 +451,7 @@ public class QNX6FS {
                 superBlock = parseQNX6SuperBlock(data, startingOffset);
             }
             
+            System.out.println("Magic value for partition " + partitionID + ": " + (int) superBlock.get("magic"));
             // Validate the superblock's magic value
             if ((int) superBlock.get("magic") == PARTITION_MAGIC.get("QNX6")) {
                 System.out.printf(" |---+ First SuperBlock Detected ( Serial: %s ) @ %02x%n",
@@ -364,25 +460,40 @@ public class QNX6FS {
                 // Calculate backup superblock offset
                 long backupSuperBlockOffset = startingOffset + QNX6_SUPERBLOCK_AREA + QNX6_BOOTBLOCK_SIZE
                         + ((int) superBlock.get("num_blocks") * (int) superBlock.get("blocksize"));
-                resetStream(fileIO, backupSuperBlockOffset);
+                
+                if (backupSuperBlockOffset < 0) {
+                    System.err.printf("Warning: Negative backup superblock offset for partition %d. Skipping backup superblock.%n", partitionID);
+                    backupSuperBlockOffset = 0;
+                }
+                fileIO.seek(backupSuperBlockOffset);
                 data = new byte[(int) superBlock.get("blocksize")];
                 fileIO.read(data);
                 Map<String, Object> blkSuperBlock = parseQNX6SuperBlock(data, startingOffset);
                 
+                System.out.println("Magic value for partition " + partitionID + ": " + (int) blkSuperBlock.get("magic"));
+                
                 // validate backup superblock
-                if ((int) blkSuperBlock.get("magic") == PARTITION_MAGIC.get("QNX6")) {
-                    System.out.printf("     |---+ Second SuperBlock Detected ( Serial: %s ) @ %02x%n",
-                            blkSuperBlock.get("serial"), backupSuperBlockOffset);
-
-                    // Determine the active superblock
+                if ((int) blkSuperBlock.get("magic") == PARTITION_MAGIC.get("QNX6") || (int) blkSuperBlock.get("magic") == 0) {
                     Map<String, Object> activeSuperBlock;
-                    if ((long) blkSuperBlock.get("serial") < (long) superBlock.get("serial")) {
-                        activeSuperBlock = superBlock;
-                        System.out.println("         |---+ Using First SuperBlock as Active Block");
-                    } else {
-                        activeSuperBlock = blkSuperBlock;
-                        System.out.println("         |---+ Using Second SuperBlock as Active Block");
+                    if (!((int)blkSuperBlock.get("magic") == 0)) {
+                        System.out.printf("     |---+ Second SuperBlock Detected ( Serial: %s ) @ %02x%n",
+                            blkSuperBlock.get("serial"), backupSuperBlockOffset);
+                        // Determine the active superblock
+                        if ((long) blkSuperBlock.get("serial") < (long) superBlock.get("serial")) {
+                            activeSuperBlock = superBlock;
+                            System.out.println("         |---+ Using First SuperBlock as Active Block");
+                        }
+                        else {
+                            activeSuperBlock = blkSuperBlock;
+                            System.out.println("         |---+ Using Second SuperBlock as Active Block");
+                        }
                     }
+                    else {
+                        activeSuperBlock = superBlock;
+                    }
+                    
+                    
+                    
                     
                     // Print superblock information and parse additional components
                     printSuperBlockInfo(activeSuperBlock);
@@ -397,25 +508,23 @@ public class QNX6FS {
                     if (!dir.exists()) {
                         dir.mkdirs();
                         }
-                    
-                    parseINODE(image, activeSuperBlock, partitionID);
-                    
-                    Map<Integer, String> longNames = new HashMap<>();
                     this.longNames = parseLongFileNames(image, activeSuperBlock);
-                    longNames = this.longNames;
+                    parseINODE(image, activeSuperBlock, partitionID);
+                    //parseINODE(image, activeSuperBlock, partitionID);
+                    
                     // Iterate through the map and print the key (formatted as hexadeciam) and value
-                    if (longNames != null) {
-                        for (Map.Entry<Integer, String> entry : longNames.entrySet()) {
-                            int inodeID = entry.getKey();
-                            String longFileName = entry.getValue();
-                            if (inodeTree.containsKey(inodeID)) {
-                                System.out.printf("Processing long file: %s (inode: %02x)%n", longFileName, inodeID);
-                                dumpFile(image, inodeID, outputDirectory, (int) superBlock.get("blocksize"), (long) superBlock.get("blks_offset"), partitionID);
-
-                            }
-                            System.out.printf("%02x: %s%n", entry.getKey(), entry.getValue());
-                        }
-                    }
+//                    if (longNames != null) {
+//                        for (Map.Entry<Integer, String> entry : longNames.entrySet()) {
+//                            int inodeID = entry.getKey();
+//                            String longFileName = entry.getValue();
+//                            if (inodeTree.containsKey(inodeID)) {
+//                                System.out.printf("Processing long file: %s (inode: %02x)%n", longFileName, inodeID);
+//                                dumpFile(image, inodeID, outputDirectory, (int) superBlock.get("blocksize"), (long) superBlock.get("blks_offset"), partitionID);
+//
+//                            }
+//                            System.out.printf("%02x: %s%n", entry.getKey(), entry.getValue());
+//                        }
+//                    }
                     
                 }
             }
@@ -462,7 +571,7 @@ public class QNX6FS {
         System.out.printf("[-] Generating directory Listing && Auto Extracting Files to (./Extracted/Partition%d)%n", partitionID);
         long blocksize = ((Number) superBlock.get("blocksize")).longValue();
         long blksOffset = ((Number) superBlock.get("blks_offset")).longValue();
-        parseINodeDIRStruct(image, blocksize, blksOffset, 1, longNames);
+        parseINodeDIRStruct(image, blocksize, blksOffset, 1);
         
         // Determine Autopsy case output directory
         Case currentCase = Case.getCurrentCaseThrows(); // Get current case
@@ -509,6 +618,7 @@ public class QNX6FS {
                 return;
             }
             String filename = (String) dirTree.get(dataINodeID).get("Name");
+            
             
             // Create directory path
             StringBuilder dirPath = new StringBuilder();
@@ -707,7 +817,7 @@ public class QNX6FS {
         return String.format("%.1f %s", value, symbols[symbols.length - 1]);
     }
     
-    public void parseINodeDIRStruct(Content image, long blksize, long blksOffset, int inodeID, Map<Integer, String> longNames) throws IOException {
+    public void parseINodeDIRStruct(Content image, long blksize, long blksOffset, int inodeID) throws IOException {
         // Get the inode entry from the tree
         Map<String, Object> inodeEntry = inodeTree.get(inodeID);
         System.out.println("Processing inodeID: " + inodeID);
@@ -754,11 +864,6 @@ public class QNX6FS {
 
                     if (!"..".equals(name) && !".".equals(name)) {
                         int ptr = (int) obj.get("PTR");
-                        // Check for long filename
-                        if (longNames.containsKey(ptr)) {
-                            name = longNames.get(ptr);
-                            System.out.println("Using long filename: " + name);
-                        }
                         System.out.println("Adding to dirTree: " + ptr + " -> " + name);
                         
                         // Create a map manually instead of using Map.of
@@ -770,8 +875,8 @@ public class QNX6FS {
 
                         // Recursively process directories
                         if (ptr > 1) {
-                            System.out.println("Recursively processing inode: " + ptr);
-                            parseINodeDIRStruct(image, blksize, blksOffset, ptr, longNames);
+                            System.out.println("Recursively processing inode: " + name);
+                            parseINodeDIRStruct(image, blksize, blksOffset, ptr);
                         }
                     }
                 }
@@ -782,60 +887,63 @@ public class QNX6FS {
         }
     }
     
-    public Map<String, Map<String, Object>> parseInodeDirBatch(Content image, List<Long> ptrs, long blksize, long blksOffset) throws IOException { 
-        ReadContentInputStream fileIO = new ReadContentInputStream(image);
-        Map<String, Map<String, Object>> dir = new HashMap<>();
-        
-        for (long ptr : ptrs) {
-            // Seek to the pointer position
-            fileIO.seek(ptr);
+    public Map<String, Map<String, Object>> parseInodeDirBatch(Content image, List<Long> ptrs, long blksize, long blksOffset) throws IOException {
+    Map<String, Map<String, Object>> DIR = new HashMap<>();
+    ReadContentInputStream fileIO = new ReadContentInputStream(image);
+    for (long ptr : ptrs) {
+        // Seek to the pointer location
+        fileIO.seek(ptr);
 
-            // Read raw data of size `blksize`
-            byte[] rawData = new byte[(int) blksize];
-            fileIO.read(rawData);
+        // Read raw data from the file
+        byte[] rawData = new byte[(int) blksize];
+        fileIO.read(rawData);
 
-            int numEntries = (int) (blksize / 32); // Each directory entry is 32 bytes
-            
-            for (int i = 0; i < numEntries; i++) {
-                // Extract a single directory entry
-                int start = i * 32;
-                int end = (i + 1) * 32;
-                byte[] raw = new byte[32];
-                System.arraycopy(rawData, start, raw, 0, 32);
+        // Iterate through each directory entry (32 bytes per entry)
+        int entries = (int) (blksize / 32);
+        for (int i = 0; i < entries; i++) {
+            byte[] raw = Arrays.copyOfRange(rawData, i * 32, (i + 1) * 32);
 
-                // Parse entry if the first 4 bytes (PTR) are not zero
-                ByteBuffer buffer = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN);
-                int ptrValue = buffer.getInt(0);
-                if (ptrValue != 0) {
-                    String key = ptr + "-" + i;
-                    Map<String, Object> dirEntry = new HashMap<>();
-                    dirEntry.put("PTR", ptrValue);
-                    dirEntry.put("Length", buffer.get(4) & 0xFF); // Unsigned byte
+            // Check if the entry is valid
+            int ptrValue = ByteBuffer.wrap(Arrays.copyOfRange(raw, 0, 4))
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                    .getInt();
+            if (ptrValue != 0) {
+                // Create a unique key for this directory entry
+                String key = ptr + "-" + i;
+                Map<String, Object> dirEntry = new HashMap<>();
+                dirEntry.put("PTR", ptrValue);
 
-                    int length = (int) dirEntry.get("Length");
-                    if (length <= QNX6_SHORT_NAME_MAX) {
-                        // Extract short name (27 bytes)
-                        byte[] nameBytes = new byte[27];
-                        buffer.position(5);
-                        buffer.get(nameBytes, 0, 27);
+                // Extract the length of the name
+                int length = Byte.toUnsignedInt(raw[4]);
+                dirEntry.put("Length", length);
 
-                        // Convert to string, removing null characters
-                        String name = new String(nameBytes).replace("\0", "");
-                        dirEntry.put("Name", name);
+                // Parse the name
+                if (length <= QNX6_SHORT_NAME_MAX) {
+                    // Short name: read 27 bytes and convert to string
+                    String name = new String(Arrays.copyOfRange(raw, 5, 32), StandardCharsets.US_ASCII)
+                            .replace("\0", ""); // Remove null terminators
+                    dirEntry.put("Name", name);
+                } else {
+                    // Long name: lookup in the LongNames map
+                    int longNameIndex = ByteBuffer.wrap(Arrays.copyOfRange(raw, 5, 9))
+                            .order(ByteOrder.BIG_ENDIAN)
+                            .getInt();
+                    if (this.longNames.containsKey(longNameIndex + 1)) {
+                        dirEntry.put("Name", this.longNames.get(longNameIndex + 1));
+                    } else {
+                        dirEntry.put("Name", "Unknown");
                     }
-                    else {
-                        // Extract long name using LongNames map
-                        buffer.position(5);
-                        int longNameKey = buffer.getInt();
-                        dirEntry.put("Name", longNames.get(longNameKey + 1)); // Adjust key as needed
-                    }
-                    
-                    dir.put(key, dirEntry);
                 }
+
+                // Add the entry to the directory map
+                DIR.put(key, dirEntry);
             }
         }
-        return dir;
     }
+
+    return DIR;
+}
+
     
     public void parseQNX6Inode(int ptr, int level, long blksize, long blksOffset, Content image) throws IOException { 
         ReadContentInputStream fileIO = new ReadContentInputStream(image);
@@ -844,7 +952,7 @@ public class QNX6FS {
         if (checkQNX6blkptr(ptr_) && ptr != 0xFFFFFFFF) {
             // Seek to the pointer position
             fileIO.seek(ptr_);
-
+            
             // Read raw data of size `blksize`
             byte[] rawData = new byte[(int) blksize];
             fileIO.read(rawData);
@@ -936,7 +1044,7 @@ public class QNX6FS {
     
     // Helper method to reset the stream to a specific offset
     private void resetStream(ReadContentInputStream fileIO, long offset) throws IOException {
-        ((ReadContentInputStream) fileIO).seek(offset);
+        fileIO.seek(offset);
     }
     
     public Map<Integer, String> parseLongFileNames(Content image, Map<String, Object> superBlock) throws IOException { 
@@ -951,7 +1059,7 @@ public class QNX6FS {
         
         if (level > QNX6_PTR_MAX_LEVELS) {
             System.out.println("                           *invalid levels, too many*");
-            return null;
+            return Collections.emptyMap();
         }
         
         List<Map<Integer, String>> longnames = new ArrayList<>();
@@ -975,7 +1083,6 @@ public class QNX6FS {
         // Create a dictionary of names and INode/PTRs
         Map<Integer, String> dict = new HashMap<>();
         int count = 1;
-        
         for (Map<Integer, String> nameMap : longnames) {
             if (nameMap != null) {
                 for (Map.Entry<Integer, String> entry : nameMap.entrySet()) {
