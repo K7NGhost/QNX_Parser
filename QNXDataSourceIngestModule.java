@@ -1,4 +1,4 @@
-package org.example.autopsy.testmodule;
+package org.KevinArgueta.autopsy.module;
 
 import org.sleuthkit.autopsy.ingest.FileIngestModule;
 import org.sleuthkit.datamodel.AbstractFile;
