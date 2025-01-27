@@ -113,7 +113,7 @@ public class QNX6FS {
         int counter = 0;
         
         // Uncomment and modify this list to specify which partitions to process
-        //List<Integer> partitionsToProcess = Arrays.asList(13, 14); // Example partition IDs
+        //List<Integer> partitionsToProcess = Arrays.asList(3, 5); // Example partition IDs
         
         for (Map.Entry<Integer, Partition> entry: nPartitionList.entrySet()) {
             Partition partition = entry.getValue();
@@ -248,13 +248,20 @@ public class QNX6FS {
             // Sector Size - Assumes a standard 512 bytes per sector
             partition.sectorSize = 512;
             partition.qnx6 = false;
-
+            
             int partitionID = partition.partitionType & 0xFF;
+            
+            // First check if the partitions are of type GUID Partition Table
+            if (partitionID == 0xEE) {
+                System.out.println("GPT Protective MBR detected. Parsing GPT...");
+                Map<Integer, Partition> gptPartitions = parseGPT(image, partition.startingSector);
+                partitionList.putAll(gptPartitions);
+                break;
+            }
             if (partitionID == 0x05 || partitionID == 0x0F) {
                 System.out.println("[-] (EBR) Extended Boot Record Detected, Processing....");
                 Map<Integer, Partition> extendedPartitions = parseExtendedPartitions(image, partition.startingSector, partition.sectorSize);
                 partitionList.putAll(extendedPartitions);
-                
             } else if (partitionID == 0xB1 || partitionID == 0xB2 || partitionID == 0xB3 || partitionID == 0xB4) {
                 System.out.printf("[+] Supported QNX6FS Partition Detected @ %02x%n", partition.startingOffset);
                 partition.qnx6 = true;
@@ -267,6 +274,114 @@ public class QNX6FS {
         nPartitionList = partitionList;
         return partitionList;
     }
+    
+private Map<Integer, Partition> parseGPT(Content image, long startingSector) throws IOException {
+    // Sectors are size of 1 * 512 = 512
+    // Each logical block (LBA) is 512 bytes
+    // Each entry has 128 bytes
+    // 4 entries can fit in a logical block (LBA)
+    
+    Map<Integer, Partition> gptPartitions = new HashMap<>();
+    ReadContentInputStream inputStream = new ReadContentInputStream(image);
+    byte[] sector = new byte[512];
+    
+    // Reading the GPT Header (Absolute LBA 1)
+    long gptHeaderOffset = 1L * 512L; // Absolute LBA 1
+    inputStream.seek(gptHeaderOffset);
+    inputStream.read(sector);
+    
+    // Signature check
+    ByteBuffer buffer = ByteBuffer.wrap(sector).order(ByteOrder.LITTLE_ENDIAN);
+    long signature = buffer.getLong(0); // GPT Signature
+    if (signature != 0x5452415020494645L) { // "EFI PART"
+        System.err.println("Invalid GPT header signature.");
+        return gptPartitions;
+    }
+    System.out.println("Correct signature of: 0x5452415020494645L");
+    
+    // Extracting GPT Header Fields
+    int numPartitionEntries = buffer.getInt(80);   // How many partition entreis the GPT defines (commonly 128)
+    System.out.println("    -- number of entries is: " + numPartitionEntries);
+    int partitionEntrySize  = buffer.getInt(84);   // The size (in bytes) of a single partition entry (commonly 128)
+    System.out.println("    -- Size of a single partition entry: " + partitionEntrySize);
+    long partitionArrayLBA  = buffer.getLong(72);  // Which LBA the partition entreis start at (commonly 2)
+    System.out.println("    -- The starting LBA of array of partition entries is: " + partitionArrayLBA);
+
+    // Reading the Partition entry array
+    
+    // partition entry at the start of LBA 2 
+    long partitionArrayOffset = 2L * 512L;
+
+    // Read Partition Entries
+    inputStream.seek(partitionArrayOffset);
+    byte[] partitionArray = new byte[numPartitionEntries * partitionEntrySize];
+    int bytesRead = inputStream.read(partitionArray);
+    if (bytesRead < partitionArray.length) {
+        throw new IOException (
+                String.format("Partition array rad only %d of %d bytes", bytesRead, partitionArray)
+        );
+    }
+    
+    // Iterating over each partition entry
+    for (int i = 0; i < numPartitionEntries; i++) {
+        int entryOffset = i * partitionEntrySize;
+        System.out.println("        -- The entry offset is: " + entryOffset);
+        ByteBuffer entryBuffer = ByteBuffer.wrap(partitionArray, entryOffset, partitionEntrySize).order(ByteOrder.LITTLE_ENDIAN);
+        
+        // Extracting Start/End LBA and Name
+        long startingLBA = entryBuffer.getLong(32 + entryOffset); // At offset 32 in the entry is the partition's starting LBA
+        System.out.println("        -- Starting logical block is " + startingLBA);
+        long endingLBA   = entryBuffer.getLong(40 + entryOffset); // At offset 40 is the ending LBA
+        System.out.println("        -- Ending logical block is " + endingLBA);
+        if (startingLBA == 0 && endingLBA == 0) {
+            System.out.println("Empty entry: continuing!");
+            continue; // Empty entry
+        }
+        
+        // Offsets 56 through 127 (72 bytes) is the UTF-16 partition name
+        byte[] partitionNameBytes = new byte[72];
+        entryBuffer.position(56 + entryOffset); // Partition name starts at offset 56
+        entryBuffer.get(partitionNameBytes);
+        String partitionName = new String(partitionNameBytes, "UTF-16LE").trim();
+        System.out.println("        -- Partition name is: " + partitionName);
+        
+        // Extract Partition type GUID
+        byte[] typeGUIDBytes = new byte[16];
+        entryBuffer.position(0 + entryOffset);
+        entryBuffer.get(typeGUIDBytes);
+        
+        // Constructing the partition object
+        Partition partition = new Partition();
+        // GPT does not have a boot indicator, so default 0
+        partition.bootIndicator = 0;
+        
+        // GPT does not use CHS; set these to empty or default values
+        partition.startingCHS = new byte[]{0,0,0};
+        partition.endingCHS = new byte[]{0, 0, 0};
+        
+        partition.partitionType = typeGUIDBytes[0];
+        
+        partition.startingSector = (int) (startingLBA);
+        partition.endingSector   = (int) (endingLBA);
+
+        partition.startingOffset = (startingLBA) * 512L;
+        partition.endOffset      = (endingLBA) * 512L;
+        partition.partitionSize  = (int) (endingLBA - startingLBA + 1);
+        partition.sectorSize     = 512;
+        
+        // Printing & storing partitions
+        System.out.printf(
+            "           -- GPT Partition %d: Start LBA=%d, End LBA=%d, Name=%s%n",
+            i + 1, partition.startingSector, partition.endingSector, partitionName
+        );
+
+        gptPartitions.put(i + 1, partition);
+    }
+
+    return gptPartitions;
+}
+
+
     
     private Map<Integer, Partition> parseExtendedPartitions(Content image, long extendedPartitionStart, int sectorSize) throws IOException {
     Map<Integer, Partition> partitionList = new HashMap<>();
@@ -382,7 +497,12 @@ public class QNX6FS {
                 // Calculate backup superblock offset
                 long backupSuperBlockOffset = startingOffset + QNX6_SUPERBLOCK_AREA + QNX6_BOOTBLOCK_SIZE
                         + ((int) superBlock.get("num_blocks") * (int) superBlock.get("blocksize"));
-                resetStream(fileIO, backupSuperBlockOffset);
+                
+                if (backupSuperBlockOffset < 0) {
+                    System.err.printf("Warning: Negative backup superblock offset for partition %d. Skipping backup superblock.%n", partitionID);
+                    backupSuperBlockOffset = 0;
+                }
+                fileIO.seek(backupSuperBlockOffset);
                 data = new byte[(int) superBlock.get("blocksize")];
                 fileIO.read(data);
                 Map<String, Object> blkSuperBlock = parseQNX6SuperBlock(data, startingOffset);
@@ -390,14 +510,16 @@ public class QNX6FS {
                 System.out.println("Magic value for partition " + partitionID + ": " + (int) blkSuperBlock.get("magic"));
                 
                 // validate backup superblock
-                if ((int) blkSuperBlock.get("magic") == PARTITION_MAGIC.get("QNX6") || (int) blkSuperBlock.get("magic") == 0) {
+                if ((int) blkSuperBlock.get("magic") == PARTITION_MAGIC.get("QNX6") || (int) blkSuperBlock.get("magic") <= 0) {
                     Map<String, Object> activeSuperBlock;
-                    if (!((int)blkSuperBlock.get("magic") == 0)) {
+                    if (!((int)blkSuperBlock.get("magic") <= 0)) {
                         System.out.printf("     |---+ Second SuperBlock Detected ( Serial: %s ) @ %02x%n",
                             blkSuperBlock.get("serial"), backupSuperBlockOffset);
                         // Determine the active superblock
                         if ((long) blkSuperBlock.get("serial") < (long) superBlock.get("serial")) {
-                            activeSuperBlock = superBlock;
+                            // UNCOMMENT THIS FOR ITS INTENDED USE
+                            //activeSuperBlock = superBlock;
+                            activeSuperBlock = blkSuperBlock;
                             System.out.println("         |---+ Using First SuperBlock as Active Block");
                         }
                         else {
@@ -427,22 +549,6 @@ public class QNX6FS {
                         }
                     this.longNames = parseLongFileNames(image, activeSuperBlock);
                     parseINODE(image, activeSuperBlock, partitionID);
-                    //parseINODE(image, activeSuperBlock, partitionID);
-                    
-                    // Iterate through the map and print the key (formatted as hexadeciam) and value
-//                    if (longNames != null) {
-//                        for (Map.Entry<Integer, String> entry : longNames.entrySet()) {
-//                            int inodeID = entry.getKey();
-//                            String longFileName = entry.getValue();
-//                            if (inodeTree.containsKey(inodeID)) {
-//                                System.out.printf("Processing long file: %s (inode: %02x)%n", longFileName, inodeID);
-//                                dumpFile(image, inodeID, outputDirectory, (int) superBlock.get("blocksize"), (long) superBlock.get("blks_offset"), partitionID);
-//
-//                            }
-//                            System.out.printf("%02x: %s%n", entry.getKey(), entry.getValue());
-//                        }
-//                    }
-                    
                 }
             }
         }
@@ -961,7 +1067,7 @@ public class QNX6FS {
     
     // Helper method to reset the stream to a specific offset
     private void resetStream(ReadContentInputStream fileIO, long offset) throws IOException {
-        ((ReadContentInputStream) fileIO).seek(offset);
+        fileIO.seek(offset);
     }
     
     public Map<Integer, String> parseLongFileNames(Content image, Map<String, Object> superBlock) throws IOException { 
