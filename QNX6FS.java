@@ -42,6 +42,7 @@ import org.sleuthkit.autopsy.casemodule.NoCurrentCaseException;
 import org.sleuthkit.datamodel.LocalDirectory;
 
 import org.sleuthkit.datamodel.SleuthkitCase.CaseDbTransaction;
+import org.sleuthkit.datamodel.Transaction;
 import org.sleuthkit.datamodel.TskData;
 import org.sleuthkit.datamodel.VolumeSystem;
 
@@ -113,7 +114,7 @@ public class QNX6FS {
         int counter = 0;
         
         // Uncomment and modify this list to specify which partitions to process
-        //List<Integer> partitionsToProcess = Arrays.asList(3, 5); // Example partition IDs
+        //List<Integer> partitionsToProcess = Arrays.asList(9); // Example partition IDs
         
         for (Map.Entry<Integer, Partition> entry: nPartitionList.entrySet()) {
             Partition partition = entry.getValue();
@@ -122,20 +123,25 @@ public class QNX6FS {
             
             // Uncomment this block to process only specified partitions
 //            if (!partitionsToProcess.contains(entry.getKey())) {
+//                counter++;
 //                continue;
 //            }
             
             if (partitionID == 0x05 || partitionID == 0x0F) {
+                counter++;
                 System.out.println("ERRRRRRRRROOOOOOOOOOOOORRRRRRRRRR");
                 continue;
             }
             if (partition.partitionType == 0x00 | partition.partitionType == 0x0F) {
+                counter++;
                 System.out.println("ERRRRRRRRROOOOOOOOOOOOORRRRRRRRRR");
                 continue;
             }
             else {
                 createdDirectories.clear();
                 this.currentVolume = volumes.get(counter);
+                // Reset sOutputDirectory before setting it
+                this.sOutputDirectory = null;
                 Content partitionRootDir = skCase.addLocalDirectory(currentVolume.getId(), "Partition" + currentVolume.getName(), transaction);
                 Content currentParent = partitionRootDir;
                 this.currentParent = currentParent;
@@ -148,6 +154,14 @@ public class QNX6FS {
                 partitionMap.put("Size", (long) partition.partitionSize);
                 System.out.println("Processing the partition");
                 parseQNX(content, partitionMap, entry.getKey());
+                try { 
+                    File extractedRoot = new File(sOutputDirectory);
+                    importExtractedFolders(skCase, partitionRootDir, extractedRoot, transaction);
+                }
+                catch (NullPointerException e) {
+                    System.out.println("error this partition doesn't work");
+                    System.err.println(e);
+                }
             }
         }
            
@@ -596,10 +610,16 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
         long blksOffset = ((Number) superBlock.get("blks_offset")).longValue();
         parseINodeDIRStruct(image, blocksize, blksOffset, 1);
         
+        // Creating unique output 
+        long dataSourceId = content.getId();
+        
         // Determine Autopsy case output directory
         Case currentCase = Case.getCurrentCaseThrows(); // Get current case
         String caseDirectory = currentCase.getExportDirectory(); // Get the export directory for the case
-        String outputDirectory = caseDirectory + File.separator + "Extracted" + File.separator + "Partition" + partitionID + File.separator;
+        String outputDirectory = caseDirectory + File.separator + "Extracted" + File.separator +
+                "DataSource_" + dataSourceId + File.separator + 
+                "Partition_" + partitionID + File.separator;
+        this.sOutputDirectory = outputDirectory;
         
         // Ensure the output directory exists
         File outputDir = new File(outputDirectory);
@@ -696,63 +716,63 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
             
             // === Add to Autopsy ===
 
-            // Start adding directories and file to Autopsy
-            
-            String[] directories = dirPath.toString().split(Pattern.quote(File.separator));
-            StringBuilder fullPathBuilder = new StringBuilder();
-            
-            // Start with the root directory as the current parent
-            LocalDirectory partitionRootDir = (LocalDirectory) currentParent;
-            LocalDirectory parentDir = partitionRootDir;
-            
-            
-            for (String directoryName : directories) {
-                if (!directoryName.isEmpty()) {
-                    fullPathBuilder.append(directoryName).append(File.separator);
-                    String fullPath = fullPathBuilder.toString();
-                    
-                    if (!createdDirectories.containsKey(fullPath)) {
-                        LocalDirectory newDir = skCase.addLocalDirectory(parentDir.getId(), directoryName, transaction);
-                        createdDirectories.put(fullPath, newDir);
-                        parentDir = newDir;
-                    }
-                    else {
-                        // Reuse existing directory
-                        parentDir = createdDirectories.get(fullPath);
-                    }
-                
-                }
-            }
-            
-            currentParent = parentDir;
-
-            // File metadata
-            long size = ((Number) inodeDataEntry.get("size")).longValue();
-            long ctime = ((Number) inodeDataEntry.getOrDefault("ctime", 0L)).longValue();
-            long crtime = ((Number) inodeDataEntry.getOrDefault("crtime", 0L)).longValue();
-            long atime = ((Number) inodeDataEntry.getOrDefault("atime", 0L)).longValue();
-            long mtimeVal = ((Number) inodeDataEntry.getOrDefault("mtime", 0L)).longValue();
-
-            // Add the file to Autopsy
-            try {
-                skCase.addLocalFile(
-                    filename,
-                    filePath,                // The local extracted file path
-                    size,
-                    ctime * 1000,
-                    crtime * 1000,
-                    atime * 1000,
-                    mtimeVal * 1000,
-                    true,
-                    TskData.EncodingType.NONE,
-                    currentParent,
-                    transaction
-                );
-                System.out.printf("Passed to Autopsy: %s%n", filePath);
-            }   catch (Exception e) {
-                System.err.printf("Failed to add file '%s' under parent ID %d: %s%n", filename, currentParent.getId(), e.getMessage());
-            }
-           
+//            // Start adding directories and file to Autopsy
+//            
+//            String[] directories = dirPath.toString().split(Pattern.quote(File.separator));
+//            StringBuilder fullPathBuilder = new StringBuilder();
+//            
+//            // Start with the root directory as the current parent
+//            LocalDirectory partitionRootDir = (LocalDirectory) currentParent;
+//            LocalDirectory parentDir = partitionRootDir;
+//            
+//            
+//            for (String directoryName : directories) {
+//                if (!directoryName.isEmpty()) {
+//                    fullPathBuilder.append(directoryName).append(File.separator);
+//                    String fullPath = fullPathBuilder.toString();
+//                    
+//                    if (!createdDirectories.containsKey(fullPath)) {
+//                        LocalDirectory newDir = skCase.addLocalDirectory(parentDir.getId(), directoryName, transaction);
+//                        createdDirectories.put(fullPath, newDir);
+//                        parentDir = newDir;
+//                    }
+//                    else {
+//                        // Reuse existing directory
+//                        parentDir = createdDirectories.get(fullPath);
+//                    }
+//                
+//                }
+//            }
+//            
+//            currentParent = parentDir;
+//
+//            // File metadata
+//            long size = ((Number) inodeDataEntry.get("size")).longValue();
+//            long ctime = ((Number) inodeDataEntry.getOrDefault("ctime", 0L)).longValue();
+//            long crtime = ((Number) inodeDataEntry.getOrDefault("crtime", 0L)).longValue();
+//            long atime = ((Number) inodeDataEntry.getOrDefault("atime", 0L)).longValue();
+//            long mtimeVal = ((Number) inodeDataEntry.getOrDefault("mtime", 0L)).longValue();
+//
+//            // Add the file to Autopsy
+//            try {
+//                skCase.addLocalFile(
+//                    filename,
+//                    filePath,                // The local extracted file path
+//                    size,
+//                    ctime * 1000,
+//                    crtime * 1000,
+//                    atime * 1000,
+//                    mtimeVal * 1000,
+//                    true,
+//                    TskData.EncodingType.NONE,
+//                    currentParent,
+//                    transaction
+//                );
+//                System.out.printf("Passed to Autopsy: %s%n", filePath);
+//            }   catch (Exception e) {
+//                System.err.printf("Failed to add file '%s' under parent ID %d: %s%n", filename, currentParent.getId(), e.getMessage());
+//            }
+//           
         }
     }
 
@@ -1312,7 +1332,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                                 long physicalPtr = (count * blocksize) + blksOffset;
                                 String snippet = getSnippet(count, blocksize, blksOffset, image);
                                 // Uncomment the following line to print deleted data details
-                                //System.out.printf("                 |---Deleted Data @: %02x (%s)%n", physicalPtr, snippet); 
+                                System.out.printf("                 |---Deleted Data @: %02x (%s)%n", physicalPtr, snippet); 
                             }
                         }
                         count++;
@@ -1506,7 +1526,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
             System.out.println("VolumeSystem created with ID: " + volumeSystem.getId());
             this.volumes = new ArrayList<>();
             // Step 2: Add each partition as a Volume
-            long addr = 0;
+            long addr = 1;
             for (Map.Entry<Integer, Partition> entry : partitions.entrySet()) {          
                 Partition partition = entry.getValue();
                 if (partition.partitionType == 0x00) {
@@ -1536,8 +1556,52 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
         finally {
             //skCase.close();
         }
+    }
+    
+    // Adding to autopsy =============================================
+    public void importExtractedFolders(SleuthkitCase skCase, Content parentContent, File extractedRoot, CaseDbTransaction transaction) throws TskCoreException {
+        //LocalDirectory rootDirInAutopsy = skCase.addLocalDirectory(parentContent.getId(), extractedRoot.getName(), transaction);
+        recurseFolder(extractedRoot, parentContent, skCase, transaction);
         
+    }
+    
+    private void recurseFolder(File folderOnDisk, Content parentInAutopsy, SleuthkitCase skCase, CaseDbTransaction transaction) throws TskCoreException {
+        File[] children = folderOnDisk.listFiles();
+        if (children == null) {
+            return;
+        }
         
+        for (File child : children) {
+            if(child.isDirectory()) {
+                LocalDirectory newDir = skCase.addLocalDirectory(parentInAutopsy.getId(), child.getName(), transaction);
+                recurseFolder(child, newDir, skCase, transaction);
+            }
+            else {
+                // It's a file, so add it to Autopsy with addLocalFile()
+                // We only have local lastModified() times from Java, unless you stored
+                // QNX times somewhere else, in which case you could load them here.
+
+                long size = child.length();
+                long mtimeMillis = child.lastModified(); // returns ms since epoch
+                long ctimeMillis = mtimeMillis; // We have no separate ctime/atime from local FS
+                long crtimeMillis = mtimeMillis;
+                long atimeMillis = mtimeMillis;
+            
+                skCase.addLocalFile(
+                    child.getName(),
+                    child.getAbsolutePath(),
+                    size,
+                    ctimeMillis,
+                    crtimeMillis,
+                    atimeMillis,
+                    mtimeMillis,
+                    true,
+                    TskData.EncodingType.NONE,
+                    parentInAutopsy,
+                    transaction
+                );
+            }
+        }
     }
     
     
