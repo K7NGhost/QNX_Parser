@@ -2,8 +2,10 @@
  * Click nbfs://nbhost/SystemFileSystem/Templates/Licenses/license-default.txt to change this license
  * Click nbfs://nbhost/SystemFileSystem/Templates/Classes/Class.java to edit this template
  */
-package org.KevinArgueta.autopsy.module;
+package com.KevinArgueta.autopsy.qnx6parser;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
 import org.sleuthkit.datamodel.Content;
 import org.sleuthkit.datamodel.Image;
@@ -19,7 +21,10 @@ import java.util.HashMap;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.Math;
 import java.util.zip.Deflater;
 import java.util.zip.Inflater;
@@ -29,19 +34,29 @@ import java.util.regex.Matcher;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.logging.Logger;
 import java.util.zip.CRC32;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 import org.sleuthkit.autopsy.casemodule.Case;
 import org.sleuthkit.autopsy.casemodule.NoCurrentCaseException;
+import org.sleuthkit.datamodel.Blackboard;
+import org.sleuthkit.datamodel.BlackboardArtifact;
+import org.sleuthkit.datamodel.BlackboardAttribute;
 import org.sleuthkit.datamodel.LocalDirectory;
 
 import org.sleuthkit.datamodel.SleuthkitCase.CaseDbTransaction;
+import org.sleuthkit.datamodel.Transaction;
 import org.sleuthkit.datamodel.TskData;
 import org.sleuthkit.datamodel.VolumeSystem;
 
@@ -50,6 +65,7 @@ public class QNX6FS {
     ArrayList<Volume> volumes;
     Volume currentVolume;
     SleuthkitCase skCase;
+    Long ingestJobId;
     CaseDbTransaction transaction;
     Content currentParent;
     private Map<String, LocalDirectory> createdDirectories = new HashMap<>();
@@ -104,16 +120,17 @@ public class QNX6FS {
         this.content = content;
     }
     
-    public void processQNX(SleuthkitCase skCase, CaseDbTransaction transaction) throws TskCoreException, IOException, NoCurrentCaseException {
+    public void processQNX(SleuthkitCase skCase, CaseDbTransaction transaction, Long ingestJobId) throws TskCoreException, IOException, NoCurrentCaseException, Blackboard.BlackboardException {
         this.skCase = skCase;
         this.transaction = transaction;
+        this.ingestJobId = ingestJobId;
         getPartitions(content, skCase, transaction);
         printPartitions();
         System.out.println("The amount of volumes in the list are: " + volumes.size());
         int counter = 0;
         
         // Uncomment and modify this list to specify which partitions to process
-        //List<Integer> partitionsToProcess = Arrays.asList(13, 14); // Example partition IDs
+        List<Integer> partitionsToProcess = Arrays.asList(13,16); // Example partition IDs
         
         for (Map.Entry<Integer, Partition> entry: nPartitionList.entrySet()) {
             Partition partition = entry.getValue();
@@ -121,21 +138,26 @@ public class QNX6FS {
             System.out.printf("===============Partition %d:%n", entry.getKey());
             
             // Uncomment this block to process only specified partitions
-//            if (!partitionsToProcess.contains(entry.getKey())) {
-//                continue;
-//            }
+            if (!partitionsToProcess.contains(entry.getKey())) {
+                counter++;
+                continue;
+            }
             
             if (partitionID == 0x05 || partitionID == 0x0F) {
+                counter++;
                 System.out.println("ERRRRRRRRROOOOOOOOOOOOORRRRRRRRRR");
                 continue;
             }
             if (partition.partitionType == 0x00 | partition.partitionType == 0x0F) {
+                counter++;
                 System.out.println("ERRRRRRRRROOOOOOOOOOOOORRRRRRRRRR");
                 continue;
             }
             else {
                 createdDirectories.clear();
                 this.currentVolume = volumes.get(counter);
+                // Reset sOutputDirectory before setting it
+                this.sOutputDirectory = null;
                 Content partitionRootDir = skCase.addLocalDirectory(currentVolume.getId(), "Partition" + currentVolume.getName(), transaction);
                 Content currentParent = partitionRootDir;
                 this.currentParent = currentParent;
@@ -148,6 +170,14 @@ public class QNX6FS {
                 partitionMap.put("Size", (long) partition.partitionSize);
                 System.out.println("Processing the partition");
                 parseQNX(content, partitionMap, entry.getKey());
+                try { 
+                    File extractedRoot = new File(sOutputDirectory);
+                    importExtractedFolders(skCase, partitionRootDir, extractedRoot, transaction);
+                }
+                catch (NullPointerException e) {
+                    System.out.println("error this partition doesn't work");
+                    System.err.println(e);
+                }
             }
         }
            
@@ -250,19 +280,18 @@ public class QNX6FS {
             partition.qnx6 = false;
             
             int partitionID = partition.partitionType & 0xFF;
+            
+            // First check if the partitions are of type GUID Partition Table
             if (partitionID == 0xEE) {
                 System.out.println("GPT Protective MBR detected. Parsing GPT...");
                 Map<Integer, Partition> gptPartitions = parseGPT(image, partition.startingSector);
                 partitionList.putAll(gptPartitions);
-                continue;
-                // TODO: add parseGPT(image); call a method to parse the GPT instead of skpping
-                
+                break;
             }
             if (partitionID == 0x05 || partitionID == 0x0F) {
                 System.out.println("[-] (EBR) Extended Boot Record Detected, Processing....");
                 Map<Integer, Partition> extendedPartitions = parseExtendedPartitions(image, partition.startingSector, partition.sectorSize);
                 partitionList.putAll(extendedPartitions);
-                
             } else if (partitionID == 0xB1 || partitionID == 0xB2 || partitionID == 0xB3 || partitionID == 0xB4) {
                 System.out.printf("[+] Supported QNX6FS Partition Detected @ %02x%n", partition.startingOffset);
                 partition.qnx6 = true;
@@ -277,64 +306,102 @@ public class QNX6FS {
     }
     
 private Map<Integer, Partition> parseGPT(Content image, long startingSector) throws IOException {
+    // Sectors are size of 1 * 512 = 512
+    // Each logical block (LBA) is 512 bytes
+    // Each entry has 128 bytes
+    // 4 entries can fit in a logical block (LBA)
+    
     Map<Integer, Partition> gptPartitions = new HashMap<>();
     ReadContentInputStream inputStream = new ReadContentInputStream(image);
     byte[] sector = new byte[512];
-
-    // Instead of always reading LBA 1 of the *entire disk*,
-    // adjust by 'startingSector' if the GPT is located at
-    // an offset partition within the disk.
+    
+    // Reading the GPT Header (Absolute LBA 1)
     long gptHeaderOffset = 1L * 512L; // Absolute LBA 1
     inputStream.seek(gptHeaderOffset);
     inputStream.read(sector);
-
+    
+    // Signature check
     ByteBuffer buffer = ByteBuffer.wrap(sector).order(ByteOrder.LITTLE_ENDIAN);
     long signature = buffer.getLong(0); // GPT Signature
     if (signature != 0x5452415020494645L) { // "EFI PART"
         System.err.println("Invalid GPT header signature.");
         return gptPartitions;
     }
+    System.out.println("Correct signature of: 0x5452415020494645L");
+    
+    // Extracting GPT Header Fields
+    int numPartitionEntries = buffer.getInt(80);   // How many partition entreis the GPT defines (commonly 128)
+    System.out.println("    -- number of entries is: " + numPartitionEntries);
+    int partitionEntrySize  = buffer.getInt(84);   // The size (in bytes) of a single partition entry (commonly 128)
+    System.out.println("    -- Size of a single partition entry: " + partitionEntrySize);
+    long partitionArrayLBA  = buffer.getLong(72);  // Which LBA the partition entreis start at (commonly 2)
+    System.out.println("    -- The starting LBA of array of partition entries is: " + partitionArrayLBA);
 
-    int numPartitionEntries = buffer.getInt(80);   // Number of partition entries
-    int partitionEntrySize  = buffer.getInt(84);   // Size of each partition entry
-    long partitionArrayLBA  = buffer.getLong(72);  // Starting LBA of partition array
-
-    // The partition array should also be offset by the same 'startingSector'
-    // if the GPT is not at the absolute beginning of the disk.
+    // Reading the Partition entry array
+    
+    // partition entry at the start of LBA 2 
     long partitionArrayOffset = 2L * 512L;
 
     // Read Partition Entries
     inputStream.seek(partitionArrayOffset);
     byte[] partitionArray = new byte[numPartitionEntries * partitionEntrySize];
-    inputStream.read(partitionArray);
-
+    int bytesRead = inputStream.read(partitionArray);
+    if (bytesRead < partitionArray.length) {
+        throw new IOException (
+                String.format("Partition array rad only %d of %d bytes", bytesRead, partitionArray)
+        );
+    }
+    
+    // Iterating over each partition entry
     for (int i = 0; i < numPartitionEntries; i++) {
         int entryOffset = i * partitionEntrySize;
-        ByteBuffer entryBuffer = ByteBuffer.wrap(partitionArray, entryOffset, partitionEntrySize)
-                                          .order(ByteOrder.LITTLE_ENDIAN);
-
-        long startingLBA = entryBuffer.getLong(32); // Starting LBA
-        long endingLBA   = entryBuffer.getLong(40); // Ending LBA
+        System.out.println("        -- The entry offset is: " + entryOffset);
+        ByteBuffer entryBuffer = ByteBuffer.wrap(partitionArray, entryOffset, partitionEntrySize).order(ByteOrder.LITTLE_ENDIAN);
+        
+        // Extracting Start/End LBA and Name
+        long startingLBA = entryBuffer.getLong(32 + entryOffset); // At offset 32 in the entry is the partition's starting LBA
+        System.out.println("        -- Starting logical block is " + startingLBA);
+        long endingLBA   = entryBuffer.getLong(40 + entryOffset); // At offset 40 is the ending LBA
+        System.out.println("        -- Ending logical block is " + endingLBA);
         if (startingLBA == 0 && endingLBA == 0) {
+            System.out.println("Empty entry: continuing!");
             continue; // Empty entry
         }
-
+        
+        // Offsets 56 through 127 (72 bytes) is the UTF-16 partition name
         byte[] partitionNameBytes = new byte[72];
-        entryBuffer.position(56); // Partition name starts at offset 56
+        entryBuffer.position(56 + entryOffset); // Partition name starts at offset 56
         entryBuffer.get(partitionNameBytes);
         String partitionName = new String(partitionNameBytes, "UTF-16LE").trim();
-
+        System.out.println("        -- Partition name is: " + partitionName);
+        
+        // Extract Partition type GUID
+        byte[] typeGUIDBytes = new byte[16];
+        entryBuffer.position(0 + entryOffset);
+        entryBuffer.get(typeGUIDBytes);
+        
+        // Constructing the partition object
         Partition partition = new Partition();
-        partition.startingSector = (int) (startingLBA + startingSector);
-        partition.endingSector   = (int) (endingLBA   + startingSector);
+        // GPT does not have a boot indicator, so default 0
+        partition.bootIndicator = 0;
+        
+        // GPT does not use CHS; set these to empty or default values
+        partition.startingCHS = new byte[]{0,0,0};
+        partition.endingCHS = new byte[]{0, 0, 0};
+        
+        partition.partitionType = typeGUIDBytes[0];
+        
+        partition.startingSector = (int) (startingLBA);
+        partition.endingSector   = (int) (endingLBA);
 
-        partition.startingOffset = (startingLBA + startingSector) * 512L;
-        partition.endOffset      = (endingLBA   + startingSector) * 512L;
+        partition.startingOffset = (startingLBA) * 512L;
+        partition.endOffset      = (endingLBA) * 512L;
         partition.partitionSize  = (int) (endingLBA - startingLBA + 1);
         partition.sectorSize     = 512;
-
+        
+        // Printing & storing partitions
         System.out.printf(
-            "GPT Partition %d: Start LBA=%d, End LBA=%d, Name=%s%n",
+            "           -- GPT Partition %d: Start LBA=%d, End LBA=%d, Name=%s%n",
             i + 1, partition.startingSector, partition.endingSector, partitionName
         );
 
@@ -420,7 +487,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
     return partition;
 }
     
-    public void parseQNX(Content image, Map<String, Long> partition, int partitionID) throws IOException, TskCoreException, NoCurrentCaseException {
+    public void parseQNX(Content image, Map<String, Long> partition, int partitionID) throws IOException, TskCoreException, NoCurrentCaseException, Blackboard.BlackboardException {
         try (ReadContentInputStream fileIO = new ReadContentInputStream(image)) {
             // Calculate initial offsets
             
@@ -473,14 +540,16 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                 System.out.println("Magic value for partition " + partitionID + ": " + (int) blkSuperBlock.get("magic"));
                 
                 // validate backup superblock
-                if ((int) blkSuperBlock.get("magic") == PARTITION_MAGIC.get("QNX6") || (int) blkSuperBlock.get("magic") == 0) {
+                if ((int) blkSuperBlock.get("magic") == PARTITION_MAGIC.get("QNX6") || (int) blkSuperBlock.get("magic") <= 0) {
                     Map<String, Object> activeSuperBlock;
-                    if (!((int)blkSuperBlock.get("magic") == 0)) {
+                    if (!((int)blkSuperBlock.get("magic") <= 0)) {
                         System.out.printf("     |---+ Second SuperBlock Detected ( Serial: %s ) @ %02x%n",
                             blkSuperBlock.get("serial"), backupSuperBlockOffset);
                         // Determine the active superblock
                         if ((long) blkSuperBlock.get("serial") < (long) superBlock.get("serial")) {
-                            activeSuperBlock = superBlock;
+                            // UNCOMMENT THIS FOR ITS INTENDED USE
+                            //activeSuperBlock = superBlock;
+                            activeSuperBlock = blkSuperBlock;
                             System.out.println("         |---+ Using First SuperBlock as Active Block");
                         }
                         else {
@@ -504,28 +573,13 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                     String outputDirectory = caseDirectory + File.separator + "Extracted" + File.separator + "Partition" + partitionID + File.separator;
 
                     // Ensure the output directory exists
-                    File dir = new File(outputDirectory);
-                    if (!dir.exists()) {
-                        dir.mkdirs();
-                        }
+                    
                     this.longNames = parseLongFileNames(image, activeSuperBlock);
                     parseINODE(image, activeSuperBlock, partitionID);
-                    //parseINODE(image, activeSuperBlock, partitionID);
                     
-                    // Iterate through the map and print the key (formatted as hexadeciam) and value
-//                    if (longNames != null) {
-//                        for (Map.Entry<Integer, String> entry : longNames.entrySet()) {
-//                            int inodeID = entry.getKey();
-//                            String longFileName = entry.getValue();
-//                            if (inodeTree.containsKey(inodeID)) {
-//                                System.out.printf("Processing long file: %s (inode: %02x)%n", longFileName, inodeID);
-//                                dumpFile(image, inodeID, outputDirectory, (int) superBlock.get("blocksize"), (long) superBlock.get("blks_offset"), partitionID);
-//
-//                            }
-//                            System.out.printf("%02x: %s%n", entry.getKey(), entry.getValue());
-//                        }
-//                    }
+                    System.out.println("Extracting deleted content...");
                     
+                    List<Map<String,Object>> deletedFiles = getDeletedContent(this.sOutputDirectory, this.inodeTree, this.dirTree, (int) superBlock.get("blocksize"), (int) this.offset, image);
                 }
             }
         }
@@ -568,15 +622,21 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
         Map<Integer,String> longNames = parseLongFileNames(image, superBlock);
 
         // Generate directory listing and extract files
-        System.out.printf("[-] Generating directory Listing && Auto Extracting Files to (./Extracted/Partition%d)%n", partitionID);
+        //System.out.printf("[-] Generating directory Listing && Auto Extracting Files to (./Extracted/Partition%d)%n", partitionID);
         long blocksize = ((Number) superBlock.get("blocksize")).longValue();
         long blksOffset = ((Number) superBlock.get("blks_offset")).longValue();
         parseINodeDIRStruct(image, blocksize, blksOffset, 1);
         
+        // Creating unique output 
+        long dataSourceId = content.getId();
+        
         // Determine Autopsy case output directory
         Case currentCase = Case.getCurrentCaseThrows(); // Get current case
         String caseDirectory = currentCase.getExportDirectory(); // Get the export directory for the case
-        String outputDirectory = caseDirectory + File.separator + "Extracted" + File.separator + "Partition" + partitionID + File.separator;
+        String outputDirectory = caseDirectory + File.separator + "Extracted" + File.separator +
+                "DataSource_" + dataSourceId + File.separator + 
+                "Partition_" + partitionID + File.separator;
+        this.sOutputDirectory = outputDirectory;
         
         // Ensure the output directory exists
         File outputDir = new File(outputDirectory);
@@ -584,9 +644,9 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
             outputDir.mkdirs();
         }
         
-        System.out.printf("dirTree size: %d%n", dirTree.size());
+        //System.out.printf("dirTree size: %d%n", dirTree.size());
         for (int i : dirTree.keySet()) {
-            System.out.println("Calling dump file");
+            //System.out.println("Calling dump file");
             dumpFile(image, i, outputDirectory, blocksize, blksOffset, partitionID);
         }
     }
@@ -614,7 +674,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
 
         if (inodeDataEntry != null && !inodeEntryIsDir((int) inodeDataEntry.get("mode"))) {
             if (!dirTree.containsKey(dataINodeID)) {
-                System.err.printf("Error: dataINodeID %d not found in dirTree.%n", dataINodeID);
+                //System.err.printf("Error: dataINodeID %d not found in dirTree.%n", dataINodeID);
                 return;
             }
             String filename = (String) dirTree.get(dataINodeID).get("Name");
@@ -633,7 +693,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                 dirID = (int) dirTree.get(dirID).get("ROOT_INODE");
             }
 
-            System.out.printf(" |--- [%s] \t %s%s%n", bytes2Human((long) inodeDataEntry.get("size")), dirPath, filename);
+            //System.out.printf(" |--- [%s] \t %s%s%n", bytes2Human((long) inodeDataEntry.get("size")), dirPath, filename);
 
             // Create list of physical blocks
             List<Long> physicalPTRs = new ArrayList<>();
@@ -657,8 +717,8 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
             File file = new File(filePath);
             
             // Print the full path of the output file
-            System.out.printf("===============================Output file path: %s%n", filePath);
-            System.out.println("Current working directory: " + System.getProperty("user.dir"));
+            //System.out.printf("===============================Output file path: %s%n", filePath);
+            //System.out.println("Current working directory: " + System.getProperty("user.dir"));
             if (!file.exists()) {
                 batchProcessPTRS(physicalPTRs, inodeDataEntry, (int) inodeDataEntry.get("filelevels"), blksize, blkOffset, filePath, image, null);
             }
@@ -669,65 +729,6 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                 file.setLastModified(Math.abs(mtime * 1000));
                 // Setting access time is not directly supported in Java's standard API
                 // FIX ME
-            }
-            
-            // === Add to Autopsy ===
-
-            // Start adding directories and file to Autopsy
-            
-            String[] directories = dirPath.toString().split(Pattern.quote(File.separator));
-            StringBuilder fullPathBuilder = new StringBuilder();
-            
-            // Start with the root directory as the current parent
-            LocalDirectory partitionRootDir = (LocalDirectory) currentParent;
-            LocalDirectory parentDir = partitionRootDir;
-            
-            
-            for (String directoryName : directories) {
-                if (!directoryName.isEmpty()) {
-                    fullPathBuilder.append(directoryName).append(File.separator);
-                    String fullPath = fullPathBuilder.toString();
-                    
-                    if (!createdDirectories.containsKey(fullPath)) {
-                        LocalDirectory newDir = skCase.addLocalDirectory(parentDir.getId(), directoryName, transaction);
-                        createdDirectories.put(fullPath, newDir);
-                        parentDir = newDir;
-                    }
-                    else {
-                        // Reuse existing directory
-                        parentDir = createdDirectories.get(fullPath);
-                    }
-                
-                }
-            }
-            
-            currentParent = parentDir;
-
-            // File metadata
-            long size = ((Number) inodeDataEntry.get("size")).longValue();
-            long ctime = ((Number) inodeDataEntry.getOrDefault("ctime", 0L)).longValue();
-            long crtime = ((Number) inodeDataEntry.getOrDefault("crtime", 0L)).longValue();
-            long atime = ((Number) inodeDataEntry.getOrDefault("atime", 0L)).longValue();
-            long mtimeVal = ((Number) inodeDataEntry.getOrDefault("mtime", 0L)).longValue();
-
-            // Add the file to Autopsy
-            try {
-                skCase.addLocalFile(
-                    filename,
-                    filePath,                // The local extracted file path
-                    size,
-                    ctime * 1000,
-                    crtime * 1000,
-                    atime * 1000,
-                    mtimeVal * 1000,
-                    true,
-                    TskData.EncodingType.NONE,
-                    currentParent,
-                    transaction
-                );
-                System.out.printf("Passed to Autopsy: %s%n", filePath);
-            }   catch (Exception e) {
-                System.err.printf("Failed to add file '%s' under parent ID %d: %s%n", filename, currentParent.getId(), e.getMessage());
             }
            
         }
@@ -820,17 +821,17 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
     public void parseINodeDIRStruct(Content image, long blksize, long blksOffset, int inodeID) throws IOException {
         // Get the inode entry from the tree
         Map<String, Object> inodeEntry = inodeTree.get(inodeID);
-        System.out.println("Processing inodeID: " + inodeID);
-        System.out.println("inodeEntry: " + inodeEntry);
+        //System.out.println("Processing inodeID: " + inodeID);
+        //System.out.println("inodeEntry: " + inodeEntry);
 
         // Check if the inode exists and is a directory
         if (inodeEntry != null && inodeEntryIsDir((int) inodeEntry.get("mode"))) {
-            System.out.println("Inode is a directory");
+            //System.out.println("Inode is a directory");
 
             // Parse all 16 pointers in the inode entry
             List<Long> physicalPtrs = new ArrayList<>();
             int[] blockPtrs = (int[]) inodeEntry.get("block_ptr");
-            System.out.println("block_ptr array: " + Arrays.toString(blockPtrs));
+            //System.out.println("block_ptr array: " + Arrays.toString(blockPtrs));
             
             for (int pointerIndex : blockPtrs) {
                 // Skip invalid pointers (0xFFFFFFFF)
@@ -839,12 +840,12 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                     physicalPtrs.add((pointerIndex * blksize) + blksOffset);
                 }
             }
-            System.out.println("Physical pointers: " + physicalPtrs);
+            //System.out.println("Physical pointers: " + physicalPtrs);
 
             // Process valid pointers for directories and files
             if (!physicalPtrs.isEmpty()) {
                 Map<String, Map<String, Object>> objects = parseInodeDirBatch(image, physicalPtrs, blksize, blksOffset);
-                System.out.println("Objects from parseInodeDirBatch: " + objects);
+                //System.out.println("Objects from parseInodeDirBatch: " + objects);
                 
                 // Find parent inode ID (".")
                 int rootID = 0;
@@ -855,7 +856,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                         break;
                     }
                 }
-                System.out.println("Root ID: " + rootID);
+                //System.out.println("Root ID: " + rootID);
 
                 // Process all objects
                 for (Map.Entry<String, Map<String, Object>> entry : objects.entrySet()) {
@@ -864,7 +865,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
 
                     if (!"..".equals(name) && !".".equals(name)) {
                         int ptr = (int) obj.get("PTR");
-                        System.out.println("Adding to dirTree: " + ptr + " -> " + name);
+                        //System.out.println("Adding to dirTree: " + ptr + " -> " + name);
                         
                         // Create a map manually instead of using Map.of
                         Map<String, Object> dirEntry = new HashMap<>();
@@ -875,7 +876,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
 
                         // Recursively process directories
                         if (ptr > 1) {
-                            System.out.println("Recursively processing inode: " + name);
+                            //System.out.println("Recursively processing inode: " + name);
                             parseINodeDIRStruct(image, blksize, blksOffset, ptr);
                         }
                     }
@@ -883,7 +884,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
             }
         }
         else {
-            System.out.println("Inode is not a directory or does not exist.");
+            //System.out.println("Inode is not a directory or does not exist.");
         }
     }
     
@@ -1132,7 +1133,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                 logFilenameNode.put((int)ptr, filename.toString().trim());
             }
             else {
-                System.err.println("Error: Invalid size (" + size + ") for ptr: " + ptr);
+                //System.err.println("Error: Invalid size (" + size + ") for ptr: " + ptr);
             }
         }
         else {
@@ -1245,7 +1246,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
         return RN;
     }
     
-    public void parseBitmap(Content image, Map<String, Object> superBlock) throws IOException {
+    public void parseBitmap(Content image, Map<String, Object> superBlock) throws IOException, TskCoreException, Blackboard.BlackboardException, NoCurrentCaseException {
         System.out.println("              |--+ Bitmap: Detected - Processing.... (using fast mode, this will still take a while.)");
         
         // Extract bitmap details
@@ -1287,9 +1288,20 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                             if (!isBlockEmpty(count, blocksize, blksOffset, image)) {
                                 dcount++;
                                 long physicalPtr = (count * blocksize) + blksOffset;
-                                String snippet = getSnippet(count, blocksize, blksOffset, image);
-                                // Uncomment the following line to print deleted data details
-                                //System.out.printf("                 |---Deleted Data @: %02x (%s)%n", physicalPtr, snippet); 
+                                // Extract inode entry from the deleted block
+                                Map<String, Object> inodeEntry = parseQNX6DeletedInode(physicalPtr, image, blocksize);
+                                if (inodeEntry != null) {
+                                    int inodeID = inodeTree.size() + 1; // Assign new inode ID
+                                    inodeEntry.put("status", 2); // Mark as deleted
+                                    inodeTree.put(inodeID, inodeEntry);
+
+                                    // If it's a directory, add to dirTree
+                                    if (inodeEntryIsDir((int) inodeEntry.get("mode"))) {
+                                        dirTree.put(inodeID, inodeEntry);
+                                    }
+                                    //System.out.printf("                 |---Recovered Deleted Inode: %d @ 0x%02x%n", inodeID, physicalPtr);
+                                }
+
                             }
                         }
                         count++;
@@ -1307,6 +1319,126 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
         // TODO: create isBlockEmpty Done
         // TODO: create getSnippet Done
         
+    }
+    
+    public Map<String,Object> parseQNX6DeletedInode(long ptrOffset, Content image, long blksize) throws ReadContentInputStream.ReadContentInputStreamException {
+        ReadContentInputStream fileIO = new ReadContentInputStream(image);
+        fileIO.seek(ptrOffset);
+        
+        byte[] inodeData = new byte[128];
+        fileIO.read(inodeData);
+        return parseQNX6InodeEntry(inodeData);
+    }
+    
+    // TODO: create a getDeletedContent method to get the deleted files and folders
+    public List<Map<String, Object>> getDeletedContent(String delFilesDirName, Map<Integer, Map<String, Object>> inodeTree, Map<Integer,Map<String, Object>> dirTree, int blksize, int blkOffset, Content image) throws IOException {
+        List<Map<String, Object>> deletedFiles = new ArrayList<>();
+        
+        File outputDir = new File(delFilesDirName);
+        if (!outputDir.exists()) {
+            outputDir.mkdirs();
+        }
+        
+        for (Integer IEidx : inodeTree.keySet()) {
+            Map<String, Object> IE = inodeTree.get(IEidx);
+            
+            if (IE != null && (int) IE.get("status") == 2 && !dirTree.containsKey(IEidx)) {
+                // If it's a deleted file
+                if (!inodeEntryIsDir((int) IE.get("mode"))) {
+                    List<Integer> PhysicalPTRs = new ArrayList<>();
+                    
+                    Object blockPtrObj = IE.get("block_ptr");
+                    List<Integer> blockPtrs = new ArrayList<>();
+                    
+                    if (blockPtrObj instanceof int[]) { // Convert int[] to List<Integer>
+                        for (int ptr : (int[]) blockPtrObj) {
+                            blockPtrs.add(ptr);
+                        }
+                    } else if (blockPtrObj instanceof List) { // If already List<Integer>
+                        blockPtrs = (List<Integer>) blockPtrObj;
+                    } else {
+                        System.err.println("Unexpected type for block_ptr: " + blockPtrObj.getClass().getName());
+                        continue;
+                    }
+                    
+                    for (Integer pointerIndex : blockPtrs) {
+                        if (pointerIndex != 0xffffffff) {
+                            PhysicalPTRs.add((pointerIndex * blksize) + blkOffset);
+                        }
+                    }
+                    // Retrieve data using the pointers
+                    byte[] data = getDataFromPTR(PhysicalPTRs, IE, (int) IE.get("filelevels"), blksize, blkOffset, image);
+                    
+                    // Construct the deleted file entry
+                    Map<String, Object> deletedFile = new HashMap<>();
+                    deletedFile.put("path", delFilesDirName);
+                    deletedFile.put("name", "deleted_" + IEidx);
+                    deletedFile.put("size", IE.get("size"));
+                    deletedFile.put("uid", IE.get("uid"));
+                    deletedFile.put("gid", IE.get("gid"));
+                    deletedFile.put("ftime", IE.get("ftime"));
+                    deletedFile.put("atime", IE.get("atime"));
+                    deletedFile.put("ctime", IE.get("ctime"));
+                    deletedFile.put("mtime", IE.get("mtime"));
+                    deletedFile.put("status", IE.get("status"));
+                    deletedFile.put("data", data);
+
+                    deletedFiles.add(deletedFile);
+                    File outputFile = new File(outputDir, "deleted_" + IEidx);
+                    try (FileOutputStream fos = new FileOutputStream(outputFile)) {
+                        fos.write(data);
+                    }
+                }
+                
+            }
+        }
+        return deletedFiles;
+    }
+    
+    public byte[] getDataFromPTR(List<Integer> ptrs, Map<String, Object> InodeDataEntry, int level, int blksize, int blkOffset, Content image) throws ReadContentInputStream.ReadContentInputStreamException, IOException {
+        ReadContentInputStream fileIO = new ReadContentInputStream(image);
+        ByteArrayOutputStream dataBuffer = new ByteArrayOutputStream();
+
+        for (int ptr : ptrs) {
+            long ptrOffset = (ptr * blksize) + blkOffset;
+            
+            if (ptrOffset < 0) {
+                //System.err.printf("Invalid pointer offset: ptr=%d, ptrOffset=%d%n", ptr, ptrOffset);
+                continue; // Skip invalid pointer
+            }
+            if (level == 0) { // When pointers are at level 0 (pointing directly to data)
+                if (checkQNX6blkptr(ptrOffset) && ptr != 0xFFFFFFFF && ptr != 0x0) { 
+                    int dataSize = ((Number) InodeDataEntry.get("size")).intValue();
+                    int readSize = Math.min(dataSize, blksize);
+                    byte[] data = new byte[readSize];
+
+                    fileIO.seek(ptrOffset);
+                    fileIO.read(data);
+                    dataBuffer.write(data);
+                }
+            } else { // For higher-level pointers, recursively retrieve data
+                if (checkQNX6blkptr(ptrOffset) && ptr != 0xFFFFFFFF && ptr != 0x0) {
+                    fileIO.seek(ptrOffset);
+                    byte[] buffer = new byte[blksize];
+                    fileIO.read(buffer);
+
+                    ByteBuffer wrappedBuffer = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN);
+                    List<Integer> level2Ptrs = new ArrayList<>();
+
+                    for (int i = 0; i < buffer.length / 4; i++) {
+                        int newPtr = wrappedBuffer.getInt();
+                        if (checkQNX6blkptr((newPtr * blksize) + blkOffset) && newPtr != 0xFFFFFFFF && newPtr != 0x0) {
+                            level2Ptrs.add(newPtr);
+                        }
+                    }
+
+                    // Recursively retrieve the data
+                    dataBuffer.write(getDataFromPTR(level2Ptrs, InodeDataEntry, level - 1, blksize, blkOffset, image));
+                }
+            }
+        }
+
+        return dataBuffer.toByteArray();
     }
     
     public void parseQNX6Bitmap(Content image, int ptr, int level, long blksize, long blksOffset) throws IOException { 
@@ -1483,7 +1615,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
             System.out.println("VolumeSystem created with ID: " + volumeSystem.getId());
             this.volumes = new ArrayList<>();
             // Step 2: Add each partition as a Volume
-            long addr = 0;
+            long addr = 1;
             for (Map.Entry<Integer, Partition> entry : partitions.entrySet()) {          
                 Partition partition = entry.getValue();
                 if (partition.partitionType == 0x00) {
@@ -1513,9 +1645,104 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
         finally {
             //skCase.close();
         }
-        
+    }
+    
+    // Adding to autopsy =============================================
+    public void importExtractedFolders(SleuthkitCase skCase, Content parentContent, File extractedRoot, CaseDbTransaction transaction) throws TskCoreException, IOException {
+        //LocalDirectory rootDirInAutopsy = skCase.addLocalDirectory(parentContent.getId(), extractedRoot.getName(), transaction);
+        recurseFolder(extractedRoot, parentContent, skCase, transaction);
         
     }
+    
+    private void recurseFolder(File folderOnDisk, Content parentInAutopsy, SleuthkitCase skCase, CaseDbTransaction transaction) throws TskCoreException, IOException {
+        File[] children = folderOnDisk.listFiles();
+        if (children == null) {
+            return;
+        }
+        
+        for (File child : children) {
+            if(child.isDirectory()) {
+                LocalDirectory newDir = skCase.addLocalDirectory(parentInAutopsy.getId(), child.getName(), transaction);
+                recurseFolder(child, newDir, skCase, transaction);
+            }
+            else {
+                // It's a file, so add it to Autopsy with addLocalFile()
+                // We only have local lastModified() times from Java, unless you stored
+                // QNX times somewhere else, in which case you could load them here.
+                if (child.getName().toLowerCase().endsWith(".tar.gz") || child.getName().toLowerCase().endsWith(".tgz")) {
+                    System.out.println("Extracting the tar gz file ==========================");
+                    File extractedTarGzFolder = new File(child.getParent(), child.getName() + "_extracted");
+                    if (!extractedTarGzFolder.exists()) {
+                        System.out.println("    - extracted tar gz folder does not exist");
+                        extractedTarGzFolder.mkdirs();
+                        extractTarGz(child, extractedTarGzFolder);
+                    }
+                    System.out.println("Done Extracting");
+                    LocalDirectory tarGzDir = skCase.addLocalDirectory(parentInAutopsy.getId(), child.getName() + "_extracted", transaction);
+                    recurseFolder(extractedTarGzFolder, tarGzDir, skCase, transaction);
+                }
+                else {
+                    long size = child.length();
+                    long mtimeMillis = child.lastModified(); // returns ms since epoch
+                    long ctimeMillis = mtimeMillis; // We have no separate ctime/atime from local FS
+                    long crtimeMillis = mtimeMillis;
+                    long atimeMillis = mtimeMillis;
+            
+                    skCase.addLocalFile(
+                        child.getName(),
+                        child.getAbsolutePath(),
+                        size,
+                        ctimeMillis,
+                        crtimeMillis,
+                        atimeMillis,
+                        mtimeMillis,
+                        true,
+                        TskData.EncodingType.NONE,
+                        parentInAutopsy,
+                        transaction
+                    );
+                }    
+            }
+        }
+    }
+    
+    public void extractTarGz(File tarGzFile, File outputFolder) throws IOException {
+        InputStream in = new FileInputStream(tarGzFile);
+        GzipCompressorInputStream gzipIn = new GzipCompressorInputStream(in);
+    try (TarArchiveInputStream tarIn = new TarArchiveInputStream(gzipIn)) {
+        TarArchiveEntry entry;
+        int BUFFER_SIZE = 4096;
+
+        while ((entry = (TarArchiveEntry) tarIn.getNextEntry()) != null) {
+            /** If the entry is a directory, create the directory. **/
+            if (entry.isDirectory()) {
+                File f = new File(entry.getName());
+                boolean created = f.mkdir();
+                if (!created) {
+                    System.out.printf("Unable to create directory '%s', during extraction of archive contents.\n",
+                            f.getAbsolutePath());
+                }
+            } else {
+                int count;
+                byte data[] = new byte[BUFFER_SIZE];
+                FileOutputStream fos = new FileOutputStream(entry.getName(), false);
+                try (BufferedOutputStream dest = new BufferedOutputStream(fos, BUFFER_SIZE)) {
+                    while ((count = tarIn.read(data, 0, BUFFER_SIZE)) != -1) {
+                        dest.write(data, 0, count);
+                    }
+                }
+            }
+        }
+
+        System.out.println("Untar completed successfully!");
+    }
+    }
+
+public boolean isGzipFile(File file) throws IOException {
+    byte[] magicBytes = Files.readAllBytes(Paths.get(file.getAbsolutePath()));
+    return magicBytes.length >= 2 && magicBytes[0] == (byte) 0x1F && magicBytes[1] == (byte) 0x8B;
+}
+
     
     
 }
