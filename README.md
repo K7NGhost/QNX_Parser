@@ -4,8 +4,8 @@ A plugin for the Autopsy digital forensics platform that parses QNX6 image files
 
 ## Features
 
-- Parses QNX6 disk image and extracts it into a folder called extracted (except longfilenames gosh darn)
-- Displays the files and directores in the tree viewer (work in progress)
+- Parses QNX6 disk images and extracts the filesystem into the export folder in the current case
+- Displays the files and directores in the tree viewer
 
 ## Usage
 
@@ -15,10 +15,10 @@ A plugin for the Autopsy digital forensics platform that parses QNX6 image files
 
 ## Contributing 
 
-Contributions are welcome, as of now it is not complete so any help is welcome.
+Contributions are welcome.
 
 ## Acknowledgements
 
-Wouldn't have been able to do this project with the hard work of the following project and its contributors:
-- Was looking for the reference but couldn't find it ¯\_(ツ)_/¯
+I Wouldn't have been able to do this project without the hard work of the following projects and its contributors:
+- Most of the logic comes straight from Mathew Evan's (https://github.com/ReFirmLabs/qnx6-extractor/blob/master/qnx6_extractor/main.py)
 - Inspiration for QNX parsing and understanding of the QNX system is thanks to the research of this repository (https://github.com/jdbonfils/QNX6FS-Parser-Ingest-Module?tab=readme-ov-file)
