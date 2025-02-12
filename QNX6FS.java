@@ -6,6 +6,7 @@ package com.KevinArgueta.autopsy.qnx6parser;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
 import org.sleuthkit.datamodel.Content;
 import org.sleuthkit.datamodel.Image;
@@ -520,7 +521,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                 superBlock = parseQNX6SuperBlock(data, startingOffset);
             }
             
-            System.out.println("Magic value for partition " + partitionID + ": " + (int) superBlock.get("magic"));
+            System.out.println("First Magic value for partition " + partitionID + ": " + (int) superBlock.get("magic"));
             // Validate the superblock's magic value
             if ((int) superBlock.get("magic") == PARTITION_MAGIC.get("QNX6")) {
                 System.out.printf(" |---+ First SuperBlock Detected ( Serial: %s ) @ %02x%n",
@@ -539,10 +540,10 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                 fileIO.read(data);
                 Map<String, Object> blkSuperBlock = parseQNX6SuperBlock(data, startingOffset);
                 
-                System.out.println("Magic value for partition " + partitionID + ": " + (int) blkSuperBlock.get("magic"));
+                System.out.println("Second Magic value for partition " + partitionID + ": " + (int) blkSuperBlock.get("magic"));
                 
                 // validate backup superblock
-                if ((int) blkSuperBlock.get("magic") == PARTITION_MAGIC.get("QNX6") || (int) blkSuperBlock.get("magic") <= 0) {
+                if ((int) blkSuperBlock.get("magic") == PARTITION_MAGIC.get("QNX6") || (int) blkSuperBlock.get("magic") <= 0 || true) {
                     Map<String, Object> activeSuperBlock;
                     if (!((int)blkSuperBlock.get("magic") <= 0)) {
                         System.out.printf("     |---+ Second SuperBlock Detected ( Serial: %s ) @ %02x%n",
@@ -550,8 +551,8 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                         // Determine the active superblock
                         if ((long) blkSuperBlock.get("serial") < (long) superBlock.get("serial")) {
                             // UNCOMMENT THIS FOR ITS INTENDED USE
-                            //activeSuperBlock = superBlock;
-                            activeSuperBlock = blkSuperBlock;
+                            activeSuperBlock = superBlock;
+                            //activeSuperBlock = blkSuperBlock;
                             System.out.println("         |---+ Using First SuperBlock as Active Block");
                         }
                         else {
@@ -581,7 +582,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                     
                     System.out.println("Extracting deleted content...");
                     
-                    List<Map<String,Object>> deletedFiles = getDeletedContent(this.sOutputDirectory, this.inodeTree, this.dirTree, (int) superBlock.get("blocksize"), (int) this.offset, image);
+                    getDeletedContent(this.sOutputDirectory, this.inodeTree, this.dirTree, (int) superBlock.get("blocksize"), (int) this.offset, image);
                 }
             }
         }
@@ -1045,10 +1046,6 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
         return inodeEntry;
     }
     
-    // Helper method to reset the stream to a specific offset
-    private void resetStream(ReadContentInputStream fileIO, long offset) throws IOException {
-        fileIO.seek(offset);
-    }
     
     public Map<Integer, String> parseLongFileNames(Content image, Map<String, Object> superBlock) throws IOException { 
         System.out.println("              |--+ Longfile: Detected - Processing....");
@@ -1278,35 +1275,49 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
         int count = 0;
         
         if (!bitmaps.isEmpty()) {
+            try (ReadContentInputStream fileIO = new ReadContentInputStream(image)) {
+            byte[] inodeBuffer = new byte[128]; // Reusable buffer for inode reads
+
             for (int i = 1; i < bitmaps.size(); i++) {
                 Map<String, Object> bitmapData = bitmaps.get(i);
                 byte[] data = (byte[]) bitmapData.get("DATA");
-                
+                if (data == null) continue; // Avoid NullPointerException
+
                 for (byte b : data) {
                     for (int ii = 0; ii < 8; ii++) {
                         int bit = (b >> ii) & 0x01;
-                        
+
                         if (bit == 0) {
                             if (!isBlockEmpty(count, blocksize, blksOffset, image)) {
                                 dcount++;
                                 long physicalPtr = (count * blocksize) + blksOffset;
-                                // Extract inode entry from the deleted block
-                                Map<String, Object> inodeEntry = parseQNX6DeletedInode(physicalPtr, image, blocksize);
+
+                                // Extract inode entry using shared fileIO and buffer
+                                Map<String, Object> inodeEntry = parseQNX6DeletedInode(physicalPtr, fileIO, inodeBuffer);
+                                
                                 if (inodeEntry != null) {
                                     int inodeID = inodeTree.size() + 1; // Assign new inode ID
                                     inodeEntry.put("status", 2); // Mark as deleted
+
+                                    // Limit memory growth
+                                    if (inodeTree.size() > 10000) {
+                                        inodeTree.clear();
+                                        System.gc();
+                                    }
                                     inodeTree.put(inodeID, inodeEntry);
 
-                                    // If it's a directory, add to dirTree
+                                    // If it's a directory, add to dirTree with a similar limit
                                     if (inodeEntryIsDir((int) inodeEntry.get("mode"))) {
+                                        if (dirTree.size() > 5000) {
+                                            dirTree.clear();
+                                        }
                                         dirTree.put(inodeID, inodeEntry);
                                     }
-                                    //System.out.printf("                 |---Recovered Deleted Inode: %d @ 0x%02x%n", inodeID, physicalPtr);
                                 }
-
                             }
                         }
                         count++;
+                    }
                     }
                 }
             }
@@ -1323,13 +1334,14 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
         
     }
     
-    public Map<String,Object> parseQNX6DeletedInode(long ptrOffset, Content image, long blksize) throws ReadContentInputStream.ReadContentInputStreamException {
-        ReadContentInputStream fileIO = new ReadContentInputStream(image);
+    public Map<String, Object> parseQNX6DeletedInode(
+        long ptrOffset, ReadContentInputStream fileIO, byte[] inodeBuffer) 
+        throws ReadContentInputStream.ReadContentInputStreamException {
+
         fileIO.seek(ptrOffset);
-        
-        byte[] inodeData = new byte[128];
-        fileIO.read(inodeData);
-        return parseQNX6InodeEntry(inodeData);
+        fileIO.read(inodeBuffer); // Reuse buffer instead of creating a new one
+
+        return parseQNX6InodeEntry(inodeBuffer);
     }
     
     // TODO: create a getDeletedContent method to get the deleted files and folders
