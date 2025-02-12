@@ -50,6 +50,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 import org.sleuthkit.autopsy.casemodule.Case;
 import org.sleuthkit.autopsy.casemodule.NoCurrentCaseException;
+import org.sleuthkit.datamodel.AbstractFile;
 import org.sleuthkit.datamodel.Blackboard;
 import org.sleuthkit.datamodel.BlackboardArtifact;
 import org.sleuthkit.datamodel.BlackboardAttribute;
@@ -58,6 +59,7 @@ import org.sleuthkit.datamodel.LocalDirectory;
 import org.sleuthkit.datamodel.SleuthkitCase.CaseDbTransaction;
 import org.sleuthkit.datamodel.Transaction;
 import org.sleuthkit.datamodel.TskData;
+import org.sleuthkit.datamodel.TskFileRange;
 import org.sleuthkit.datamodel.VolumeSystem;
 
 public class QNX6FS {
@@ -130,7 +132,7 @@ public class QNX6FS {
         int counter = 0;
         
         // Uncomment and modify this list to specify which partitions to process
-        List<Integer> partitionsToProcess = Arrays.asList(13,16); // Example partition IDs
+        //List<Integer> partitionsToProcess = Arrays.asList(13,16); // Example partition IDs
         
         for (Map.Entry<Integer, Partition> entry: nPartitionList.entrySet()) {
             Partition partition = entry.getValue();
@@ -138,10 +140,10 @@ public class QNX6FS {
             System.out.printf("===============Partition %d:%n", entry.getKey());
             
             // Uncomment this block to process only specified partitions
-            if (!partitionsToProcess.contains(entry.getKey())) {
-                counter++;
-                continue;
-            }
+//            if (!partitionsToProcess.contains(entry.getKey())) {
+//                counter++;
+//                continue;
+//            }
             
             if (partitionID == 0x05 || partitionID == 0x0F) {
                 counter++;
@@ -1666,28 +1668,20 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                 recurseFolder(child, newDir, skCase, transaction);
             }
             else {
-                // It's a file, so add it to Autopsy with addLocalFile()
-                // We only have local lastModified() times from Java, unless you stored
-                // QNX times somewhere else, in which case you could load them here.
-                if (child.getName().toLowerCase().endsWith(".tar.gz") || child.getName().toLowerCase().endsWith(".tgz")) {
-                    System.out.println("Extracting the tar gz file ==========================");
-                    File extractedTarGzFolder = new File(child.getParent(), child.getName() + "_extracted");
-                    if (!extractedTarGzFolder.exists()) {
-                        System.out.println("    - extracted tar gz folder does not exist");
-                        extractedTarGzFolder.mkdirs();
-                        extractTarGz(child, extractedTarGzFolder);
-                    }
-                    System.out.println("Done Extracting");
-                    LocalDirectory tarGzDir = skCase.addLocalDirectory(parentInAutopsy.getId(), child.getName() + "_extracted", transaction);
-                    recurseFolder(extractedTarGzFolder, tarGzDir, skCase, transaction);
-                }
-                else {
+                boolean isDeleted = child.getName().startsWith("deleted_");
+                
+//                if (isDeleted) {
+//                    System.out.println("Adding deleted file: " + child.getName());
+//                    addDeletedFileToAutopsy(child, parentInAutopsy, skCase, transaction);
+//                }
+                //else {
                     long size = child.length();
                     long mtimeMillis = child.lastModified(); // returns ms since epoch
                     long ctimeMillis = mtimeMillis; // We have no separate ctime/atime from local FS
                     long crtimeMillis = mtimeMillis;
                     long atimeMillis = mtimeMillis;
-            
+                    
+                    
                     skCase.addLocalFile(
                         child.getName(),
                         child.getAbsolutePath(),
@@ -1700,49 +1694,12 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                         TskData.EncodingType.NONE,
                         parentInAutopsy,
                         transaction
-                    );
-                }    
+                    );    
+                //}
             }
         }
     }
     
-    public void extractTarGz(File tarGzFile, File outputFolder) throws IOException {
-        InputStream in = new FileInputStream(tarGzFile);
-        GzipCompressorInputStream gzipIn = new GzipCompressorInputStream(in);
-    try (TarArchiveInputStream tarIn = new TarArchiveInputStream(gzipIn)) {
-        TarArchiveEntry entry;
-        int BUFFER_SIZE = 4096;
-
-        while ((entry = (TarArchiveEntry) tarIn.getNextEntry()) != null) {
-            /** If the entry is a directory, create the directory. **/
-            if (entry.isDirectory()) {
-                File f = new File(entry.getName());
-                boolean created = f.mkdir();
-                if (!created) {
-                    System.out.printf("Unable to create directory '%s', during extraction of archive contents.\n",
-                            f.getAbsolutePath());
-                }
-            } else {
-                int count;
-                byte data[] = new byte[BUFFER_SIZE];
-                FileOutputStream fos = new FileOutputStream(entry.getName(), false);
-                try (BufferedOutputStream dest = new BufferedOutputStream(fos, BUFFER_SIZE)) {
-                    while ((count = tarIn.read(data, 0, BUFFER_SIZE)) != -1) {
-                        dest.write(data, 0, count);
-                    }
-                }
-            }
-        }
-
-        System.out.println("Untar completed successfully!");
-    }
-    }
-
-public boolean isGzipFile(File file) throws IOException {
-    byte[] magicBytes = Files.readAllBytes(Paths.get(file.getAbsolutePath()));
-    return magicBytes.length >= 2 && magicBytes[0] == (byte) 0x1F && magicBytes[1] == (byte) 0x8B;
-}
-
-    
+  
     
 }
