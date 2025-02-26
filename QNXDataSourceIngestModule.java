@@ -1,4 +1,4 @@
-package org.KevinArgueta.autopsy.module;
+package com.KevinArgueta.autopsy.qnx6parser;
 
 import org.sleuthkit.autopsy.ingest.FileIngestModule;
 import org.sleuthkit.datamodel.AbstractFile;
@@ -45,15 +45,16 @@ public class QNXDataSourceIngestModule implements DataSourceIngestModule {
             CaseDbTransaction transaction = skCase.beginTransaction();
             System.out.println("the transaction in process worked");
             QNXFile = new QNX6FS(dataSource);
+            Long ingestJobId = context.getJobId();
             if (dataSource instanceof Image) {
-                QNXFile.processQNX(skCase, transaction);
+                QNXFile.processQNX(skCase, transaction, ingestJobId);
             }
             else {
                 // Iterate over Content objects in the data source
                 for (Content content: dataSource.getChildren()) {
                     if (content instanceof Image) {
                         System.out.println("===================================Content Type: " + content.getClass().getName());
-                        QNXFile.processQNX(skCase, transaction);
+                        QNXFile.processQNX(skCase, transaction, ingestJobId);
                         QNXFile.printPartitions();
                     }
                 }
