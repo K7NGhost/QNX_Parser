@@ -133,7 +133,7 @@ public class QNX6FS {
         int counter = 0;
         
         // Uncomment and modify this list to specify which partitions to process
-        //List<Integer> partitionsToProcess = Arrays.asList(13,16); // Example partition IDs
+        List<Integer> partitionsToProcess = Arrays.asList(15,16); // Example partition IDs
         
         for (Map.Entry<Integer, Partition> entry: nPartitionList.entrySet()) {
             Partition partition = entry.getValue();
@@ -141,10 +141,10 @@ public class QNX6FS {
             System.out.printf("===============Partition %d:%n", entry.getKey());
             
             // Uncomment this block to process only specified partitions
-//            if (!partitionsToProcess.contains(entry.getKey())) {
-//                counter++;
-//                continue;
-//            }
+            if (!partitionsToProcess.contains(entry.getKey())) {
+                counter++;
+                continue;
+            }
             
             if (partitionID == 0x05 || partitionID == 0x0F) {
                 counter++;
@@ -561,6 +561,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                         }
                     }
                     else {
+                        System.out.println("=========================== Using superBlock");
                         activeSuperBlock = superBlock;
                     }
                     
@@ -578,11 +579,16 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                     // Ensure the output directory exists
                     
                     this.longNames = parseLongFileNames(image, activeSuperBlock);
+                    System.out.println("DEBUG: Extracted Long Filenames:");
+                    for (Map.Entry<Integer, String> entry : this.longNames.entrySet()) {
+                        System.out.println("Pointer: " + entry.getKey() + " -> Filename: " + entry.getValue());
+                    }
+                    System.out.println("------ Processing longfilenames done :)");
                     parseINODE(image, activeSuperBlock, partitionID);
                     
-                    System.out.println("Extracting deleted content...");
+                    //System.out.println("Extracting deleted content...");
                     
-                    getDeletedContent(this.sOutputDirectory, this.inodeTree, this.dirTree, (int) superBlock.get("blocksize"), (int) this.offset, image);
+                    //getDeletedContent(this.sOutputDirectory, this.inodeTree, this.dirTree, (int) superBlock.get("blocksize"), (int) this.offset, image);
                 }
             }
         }
@@ -596,6 +602,12 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
     
     public void parseINODE(Content image, Map<String, Object> superBlock, int partitionID) throws IOException, TskCoreException, NoCurrentCaseException {
         System.out.println("              |--+ Inode: Detected - Processing....");
+        long blocksize2 = ((Number) superBlock.get("blocksize")).longValue();
+        long blksOffset2 = ((Number) superBlock.get("blks_offset")).longValue();
+
+        System.out.println("DEBUG: Partition 16 block size = " + blocksize2);
+        System.out.println("DEBUG: Partition 16 block offset = " + blksOffset2);
+
 
         inodeTree = new HashMap<>();
         dirTree = new HashMap<>();
@@ -621,11 +633,11 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
         }
         
         // Retrieve long filenames
-        System.out.println("              |--+ Processing Long Filenames...");
-        Map<Integer,String> longNames = parseLongFileNames(image, superBlock);
+        //System.out.println("              |--+ Processing Long Filenames...");
+        //Map<Integer,String> longNames = parseLongFileNames(image, superBlock);
 
         // Generate directory listing and extract files
-        //System.out.printf("[-] Generating directory Listing && Auto Extracting Files to (./Extracted/Partition%d)%n", partitionID);
+        System.out.printf("[-] Generating directory Listing && Auto Extracting Files to (./Extracted/Partition%d)%n", partitionID);
         long blocksize = ((Number) superBlock.get("blocksize")).longValue();
         long blksOffset = ((Number) superBlock.get("blks_offset")).longValue();
         parseINodeDIRStruct(image, blocksize, blksOffset, 1);
@@ -647,9 +659,15 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
             outputDir.mkdirs();
         }
         
-        //System.out.printf("dirTree size: %d%n", dirTree.size());
+        System.out.println("DEBUG: Directory Tree Contents:");
+        for (Map.Entry<Integer, Map<String, Object>> entry : dirTree.entrySet()) {
+            System.out.println(" Inode: " + entry.getKey() + " → Name: " + entry.getValue().get("Name"));
+        }
+
+        
+        System.out.printf("dirTree size: %d%n", dirTree.size());
         for (int i : dirTree.keySet()) {
-            //System.out.println("Calling dump file");
+            System.out.println("Calling dump file");
             dumpFile(image, i, outputDirectory, blocksize, blksOffset, partitionID);
         }
     }
@@ -696,7 +714,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                 dirID = (int) dirTree.get(dirID).get("ROOT_INODE");
             }
 
-            //System.out.printf(" |--- [%s] \t %s%s%n", bytes2Human((long) inodeDataEntry.get("size")), dirPath, filename);
+            System.out.printf(" |--- [%s] \t %s%s%n", bytes2Human((long) inodeDataEntry.get("size")), dirPath, filename);
 
             // Create list of physical blocks
             List<Long> physicalPTRs = new ArrayList<>();
@@ -720,8 +738,8 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
             File file = new File(filePath);
             
             // Print the full path of the output file
-            //System.out.printf("===============================Output file path: %s%n", filePath);
-            //System.out.println("Current working directory: " + System.getProperty("user.dir"));
+            System.out.printf("===============================Output file path: %s%n", filePath);
+            System.out.println("Current working directory: " + System.getProperty("user.dir"));
             if (!file.exists()) {
                 batchProcessPTRS(physicalPTRs, inodeDataEntry, (int) inodeDataEntry.get("filelevels"), blksize, blkOffset, filePath, image, null);
             }
@@ -822,19 +840,21 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
     }
     
     public void parseINodeDIRStruct(Content image, long blksize, long blksOffset, int inodeID) throws IOException {
+        System.out.println("DEBUG: Partition 16 block size: " + blksize);
+        System.out.println("DEBUG: Partition 16 block offset: " + blksOffset);
         // Get the inode entry from the tree
         Map<String, Object> inodeEntry = inodeTree.get(inodeID);
-        //System.out.println("Processing inodeID: " + inodeID);
-        //System.out.println("inodeEntry: " + inodeEntry);
+       System.out.println("Processing inodeID: " + inodeID);
+        System.out.println("inodeEntry: " + inodeEntry);
 
         // Check if the inode exists and is a directory
         if (inodeEntry != null && inodeEntryIsDir((int) inodeEntry.get("mode"))) {
-            //System.out.println("Inode is a directory");
+            System.out.println("Inode is a directory");
 
             // Parse all 16 pointers in the inode entry
             List<Long> physicalPtrs = new ArrayList<>();
             int[] blockPtrs = (int[]) inodeEntry.get("block_ptr");
-            //System.out.println("block_ptr array: " + Arrays.toString(blockPtrs));
+            System.out.println("block_ptr array: " + Arrays.toString(blockPtrs));
             
             for (int pointerIndex : blockPtrs) {
                 // Skip invalid pointers (0xFFFFFFFF)
@@ -843,12 +863,12 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                     physicalPtrs.add((pointerIndex * blksize) + blksOffset);
                 }
             }
-            //System.out.println("Physical pointers: " + physicalPtrs);
+            System.out.println("Physical pointers: " + physicalPtrs);
 
             // Process valid pointers for directories and files
             if (!physicalPtrs.isEmpty()) {
                 Map<String, Map<String, Object>> objects = parseInodeDirBatch(image, physicalPtrs, blksize, blksOffset);
-                //System.out.println("Objects from parseInodeDirBatch: " + objects);
+                System.out.println("Objects from parseInodeDirBatch: " + objects);
                 
                 // Find parent inode ID (".")
                 int rootID = 0;
@@ -859,7 +879,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                         break;
                     }
                 }
-                //System.out.println("Root ID: " + rootID);
+                System.out.println("Root ID: " + rootID);
 
                 // Process all objects
                 for (Map.Entry<String, Map<String, Object>> entry : objects.entrySet()) {
@@ -868,7 +888,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
 
                     if (!"..".equals(name) && !".".equals(name)) {
                         int ptr = (int) obj.get("PTR");
-                        //System.out.println("Adding to dirTree: " + ptr + " -> " + name);
+                        System.out.println("Adding to dirTree: " + ptr + " -> " + name);
                         
                         // Create a map manually instead of using Map.of
                         Map<String, Object> dirEntry = new HashMap<>();
@@ -879,7 +899,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
 
                         // Recursively process directories
                         if (ptr > 1) {
-                            //System.out.println("Recursively processing inode: " + name);
+                            System.out.println("Recursively processing inode: " + name);
                             parseINodeDIRStruct(image, blksize, blksOffset, ptr);
                         }
                     }
@@ -887,7 +907,7 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
             }
         }
         else {
-            //System.out.println("Inode is not a directory or does not exist.");
+            System.out.println("Inode is not a directory or does not exist.");
         }
     }
     
@@ -932,9 +952,19 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                     int longNameIndex = ByteBuffer.wrap(Arrays.copyOfRange(raw, 5, 9))
                             .order(ByteOrder.BIG_ENDIAN)
                             .getInt();
+                    
+                    System.out.println("DEBUG: Checking long name index = " + longNameIndex);
                     if (this.longNames.containsKey(longNameIndex + 1)) {
-                        dirEntry.put("Name", this.longNames.get(longNameIndex + 1));
-                    } else {
+                        String longFilename = this.longNames.get(longNameIndex + 1);
+                        System.out.println("DEBUG: Matched Long Filename for index " + (longNameIndex + 1) + " → " + longFilename);
+                        dirEntry.put("Name", longFilename);
+                    } else if (this.longNames.containsKey(longNameIndex)) { 
+                        String longFilename = this.longNames.get(longNameIndex);
+                        System.out.println("DEBUG: Matched Long Filename for exact index " + longNameIndex + " → " + longFilename);
+                        dirEntry.put("Name", longFilename);
+                    }
+                        else {
+                        System.out.println("WARNING: Long filename not found for index " + longNameIndex);
                         dirEntry.put("Name", "Unknown");
                     }
                 }
@@ -1071,11 +1101,12 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                 long ptrB = (ptr * blocksize) + blksOffset;
                 System.out.printf("                    |-- %d: %02x%n", n, ptrB);
                 try { 
+                    System.out.println("DEBUG: Processing pointer index " + n + ", ptr = " + ptr);
                     longnames.add(parseQNX6LongFilename(image, ptr, level, blocksize, blksOffset));
+                    System.out.println("DEBUG: longnames just had something added to it");
                 }
                 catch (IOException e) {
                     System.err.println("Error processing filename: " + e.getMessage());
-                    e.printStackTrace();
                 }
             }
         }
@@ -1098,6 +1129,11 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
     
     public Map<Integer, String> parseQNX6LongFilename(Content image, long ptr, int level, long blksize, long blksOffset) throws IOException { 
         ReadContentInputStream fileIO = new ReadContentInputStream(image);
+        // Prints the partition block size and the current pointer
+        System.out.println("DEBUG: Partition Block Size = " + blksize + ", ptr = " + ptr);
+        
+        // Calculates the absolute position where the filename should be located
+        System.out.println("DEBUG: Calculated position = " + ((ptr * blksize) + blksOffset));
         
         // Seek to the appropriate location
         long position = (ptr * blksize) + blksOffset;
@@ -1110,15 +1146,26 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
         // Read 512 bytes
         byte[] handle = new byte[512];
         fileIO.read(handle);
+        
+        // TODO: turn this into ASCII
+        System.out.print("DEBUG: First 64 bytes of handle (ASCII): ");
+        for (byte b : Arrays.copyOf(handle, 64)) {
+            char c = (b >= 32 && b <= 126) ? (char) b : '.'; // Replace non-printable characters with '.'
+            System.out.print(c);
+        }
+        System.out.println();
 
+        
         Map<Integer, String> logFilenameNode = new HashMap<>();
         
+        // if level == 1 we have reached an actual filename entry
+        // Otherwise we need to process pointers recursively
         if (level == 0) {
-            // Extract size
+            // Reads the first 2 bytes (getshort(0)) to get the length of the filename
             ByteBuffer buffer = ByteBuffer.wrap(handle).order(ByteOrder.LITTLE_ENDIAN);
             int size = buffer.getShort(0) & 0xFFFF; // Unsigned short
             
-            // Extract filename bytes
+            // Extracts the filename bytes
             if (size > 0 && size <= (handle.length - 2)) {
                 byte[] fname = new byte[size];
                 System.arraycopy(handle, 2, fname, 0, size);
@@ -1129,12 +1176,14 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
                     filename.append((char) b);
                 }
                 
+                // Maps the filename to its block pointer
                 logFilenameNode.put((int)ptr, filename.toString().trim());
             }
             else {
                 //System.err.println("Error: Invalid size (" + size + ") for ptr: " + ptr);
             }
         }
+        // Proces Higher-Level pointers of level > 0
         else {
             // Extract 128 pointers (32-bit integers)
             ByteBuffer buffer = ByteBuffer.wrap(handle).order(ByteOrder.LITTLE_ENDIAN);
@@ -1146,6 +1195,14 @@ private Map<Integer, Partition> parseGPT(Content image, long startingSector) thr
             // Recursively process pointers 
             for (int i = 0; i < 128; i++) {
                 if (checkQNX6blkptr(pointers[i])) {
+                    System.out.println("DEBUG: Recursively processing pointer[" + i + "] = " + pointers[i]);
+                    
+                    // Prevent infinite loops due to bad pointers
+                    if (pointers[i] == ptr) {
+                        System.err.println("WARNING: Infinite loop detected! Skipping pointer " + pointers[i]);
+                        continue;
+                    }
+                    // Recursively call parseQNX6LongFilename
                     Map<Integer, String> name = parseQNX6LongFilename(image, pointers[i], level - 1, blksize, blksOffset);
                     if (name != null) {
                         logFilenameNode.putAll(name);
